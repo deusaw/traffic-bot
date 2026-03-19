@@ -216,13 +216,21 @@ func handleSyncInput(env *AppEnv, chatID int64, text string) {
 	reply := fmt.Sprintf("✅ 已同步！当前周期用量已覆盖为 %s\n覆盖前统计：%s",
 		FormatBytes(actual), FormatBytes(oldTotal))
 
-	// Recommend factor: actual / (vnStat raw total), only if vnStat has meaningful data
-	rawVnstat := float64(cycleBytes)
-	if rawVnstat > 0 {
-		suggested := actual / rawVnstat
-		reply += fmt.Sprintf("\n\n推荐校准倍率：%.4f\n回复 *是* 应用此倍率，或发送其他内容跳过", suggested)
-		pendingFactor = suggested
-		UpdateConfig(func(c *AppConfig) { c.SetupStep = 6 })
+	// Recommend factor only when meaningful:
+	// oldTotal must be from pure vnStat (no previous sync offset), and differ from actual
+	// Use oldTotal (what user saw before sync) vs actual (what panel says)
+	if oldTotal > 0 && cfg.UsageOffset == 0 {
+		suggested := actual / oldTotal
+		// Only recommend if there's a meaningful difference (>1%)
+		diff := suggested - 1.0
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff > 0.01 {
+			reply += fmt.Sprintf("\n\n推荐校准倍率：%.4f\n回复 *是* 应用此倍率，或发送其他内容跳过", suggested)
+			pendingFactor = suggested
+			UpdateConfig(func(c *AppConfig) { c.SetupStep = 6 })
+		}
 	}
 
 	SendMessage(chatID, reply)
