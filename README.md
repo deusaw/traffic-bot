@@ -13,12 +13,28 @@ VPS 双向流量监控与 Telegram 推送助手，专为搬瓦工等按双向流
 
 ## 部署
 
-```bash
-# 编译
-CGO_ENABLED=1 go build -o traffic-bot .
+支持 CentOS 7/8、Ubuntu 18+、Debian 10+，一键脚本自动处理所有依赖：
 
-# 一键部署（CentOS 7）
-sudo bash install.sh
+```bash
+# 方式一：直接远程执行（需要交互输入 Bot Token 和 Chat ID）
+curl -sL https://raw.githubusercontent.com/deusaw/traffic-bot/main/install.sh | bash
+
+# 方式二：克隆后执行
+git clone https://github.com/deusaw/traffic-bot.git
+cd traffic-bot
+bash install.sh
+
+# 方式三：预设环境变量免交互
+export BOT_TOKEN="your_token"
+export CHAT_ID="your_chat_id"
+bash install.sh
+```
+
+脚本会自动：安装 Go、gcc、vnStat → 编译项目 → 检测网卡 → 注册 Systemd 服务 → 启动
+
+后续更新：
+```bash
+bash /opt/traffic-bot/update.sh
 ```
 
 ## 环境变量
