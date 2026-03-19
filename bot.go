@@ -188,19 +188,24 @@ func handleSyncInput(env *AppEnv, chatID int64, text string) {
 	start, end := GetCycleDates(cfg.ResetDay)
 	cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
 
+	// The old local total (before sync) with current factor applied
+	oldLocal := float64(cycleBytes) * cfg.CalibrationFactor
+
+	// Save: sync_usage = actual, sync_local_base = current local (for future increment calc)
 	UpdateConfig(func(c *AppConfig) {
 		c.SyncUsage = actual
 		c.SyncLocalBase = float64(cycleBytes)
 		c.SetupStep = 0
 	})
 
-	reply := fmt.Sprintf("✅ 已同步！当前周期用量已设为 %s\n后续 vnStat 新增流量将在此基础上累加。", FormatBytes(actual))
+	reply := fmt.Sprintf("✅ 已同步！当前周期用量已覆盖为 %s\n覆盖前本地统计：%s",
+		FormatBytes(actual), FormatBytes(oldLocal))
 
-	// If local data exists, recommend a calibration factor
+	// Recommend factor if local data exists
 	if cycleBytes > 0 {
 		suggested := actual / float64(cycleBytes)
-		reply += fmt.Sprintf("\n\n本地统计：%s\n推荐校准倍率：%.4f\n\n回复 *是* 应用此倍率，或发送其他内容跳过",
-			FormatBytes(float64(cycleBytes)), suggested)
+		reply += fmt.Sprintf("\n\n推荐校准倍率：%.4f\n回复 *是* 应用此倍率，或发送其他内容跳过",
+			suggested)
 		pendingFactor = suggested
 		UpdateConfig(func(c *AppConfig) { c.SetupStep = 6 })
 	}
