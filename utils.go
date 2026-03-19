@@ -30,34 +30,51 @@ func FormatBytes(b float64) string {
 	}
 }
 
+// NowInZone returns current time in the given IANA timezone.
+// Falls back to system local time if tz is empty or invalid.
+func NowInZone(tz string) time.Time {
+	if tz != "" {
+		if loc, err := time.LoadLocation(tz); err == nil {
+			return time.Now().In(loc)
+		}
+	}
+	return time.Now()
+}
+
 // GetCycleDates returns the start and end dates of the current billing cycle.
-func GetCycleDates(resetDay int) (start, end time.Time) {
-	now := time.Now()
+func GetCycleDates(resetDay int, tz ...string) (start, end time.Time) {
+	tzStr := ""
+	if len(tz) > 0 {
+		tzStr = tz[0]
+	}
+	now := NowInZone(tzStr)
 	year, month, day := now.Date()
+	loc := now.Location()
 
 	if day >= resetDay {
-		// Current cycle: this month's reset day -> next month's reset day - 1
-		start = time.Date(year, month, resetDay, 0, 0, 0, 0, time.Local)
-		end = time.Date(year, month+1, resetDay-1, 23, 59, 59, 0, time.Local)
+		start = time.Date(year, month, resetDay, 0, 0, 0, 0, loc)
+		end = time.Date(year, month+1, resetDay-1, 23, 59, 59, 0, loc)
 	} else {
-		// Current cycle: last month's reset day -> this month's reset day - 1
-		start = time.Date(year, month-1, resetDay, 0, 0, 0, 0, time.Local)
-		end = time.Date(year, month, resetDay-1, 23, 59, 59, 0, time.Local)
+		start = time.Date(year, month-1, resetDay, 0, 0, 0, 0, loc)
+		end = time.Date(year, month, resetDay-1, 23, 59, 59, 0, loc)
 	}
 	return
 }
 
 // GetPrevCycleStart returns the start date of the previous billing cycle (for data cleanup).
-func GetPrevCycleStart(resetDay int) time.Time {
-	start, _ := GetCycleDates(resetDay)
-	// Previous cycle starts one month before current cycle start
+func GetPrevCycleStart(resetDay int, tz ...string) time.Time {
+	start, _ := GetCycleDates(resetDay, tz...)
 	return start.AddDate(0, -1, 0)
 }
 
 // DaysUntilReset returns how many days until the next reset.
-func DaysUntilReset(resetDay int) int {
-	_, end := GetCycleDates(resetDay)
-	now := time.Now()
+func DaysUntilReset(resetDay int, tz ...string) int {
+	tzStr := ""
+	if len(tz) > 0 {
+		tzStr = tz[0]
+	}
+	_, end := GetCycleDates(resetDay, tzStr)
+	now := NowInZone(tzStr)
 	days := int(end.Sub(now).Hours()/24) + 1
 	if days < 0 {
 		days = 0

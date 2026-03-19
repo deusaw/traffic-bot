@@ -48,7 +48,7 @@ func StartPolling(env *AppEnv) {
 	}
 }
 
-// pendingFactor stores proposed calibration factor between steps 5→6.
+// pendingFactor stores proposed calibration factor between steps 6→7.
 var pendingFactor float64
 
 func handleMessage(env *AppEnv, msg *tgbotapi.Message) {
@@ -60,30 +60,30 @@ func handleMessage(env *AppEnv, msg *tgbotapi.Message) {
 
 	text := strings.TrimSpace(msg.Text)
 
-	// Interactive steps: 1-3=wizard, 4=sync input, 5=calibrate input, 6=calibrate confirm
+	// Interactive steps: 1-4=wizard, 5=sync input, 6=calibrate input, 7=calibrate confirm
 	if cfg.SetupStep > 0 {
 		if text == "/start" {
 			UpdateConfig(func(c *AppConfig) { c.SetupStep = 1 })
 			SendMessage(msg.Chat.ID, "Welcome! Please set your monthly bandwidth quota (GB or TB).\nExample: 500 GB or 1 TB")
 			return
 		}
-		if text == "/cancel" && cfg.SetupStep >= 4 {
+		if text == "/cancel" && cfg.SetupStep >= 5 {
 			UpdateConfig(func(c *AppConfig) { c.SetupStep = 0 })
 			SendMessage(msg.Chat.ID, "Operation cancelled.")
 			return
 		}
-		if strings.HasPrefix(text, "/") && cfg.SetupStep <= 3 {
+		if strings.HasPrefix(text, "/") && cfg.SetupStep <= 4 {
 			SendMessage(msg.Chat.ID, "⏳ Please complete the initial setup first.")
 			return
 		}
 		switch cfg.SetupStep {
-		case 1, 2, 3:
+		case 1, 2, 3, 4:
 			handleWizard(msg.Chat.ID, cfg, text)
-		case 4:
-			handleSyncInput(env, msg.Chat.ID, text)
 		case 5:
-			handleCalibrateInput(env, msg.Chat.ID, text)
+			handleSyncInput(env, msg.Chat.ID, text)
 		case 6:
+			handleCalibrateInput(env, msg.Chat.ID, text)
+		case 7:
 			handleCalibrateConfirm(msg.Chat.ID, text)
 		}
 		return
@@ -143,8 +143,16 @@ func handleWizard(chatID int64, cfg *AppConfig, text string) {
 			SendMessage(chatID, "❌ Invalid time. Hours: 0-23, Minutes: 0-59.")
 			return
 		}
-		UpdateConfig(func(c *AppConfig) { c.DailyPushTime = text; c.SetupStep = 0 })
-		SendMessage(chatID, "🎉 Setup complete! Traffic monitoring is now active. Use /status to check current usage or /help for all commands.")
+		UpdateConfig(func(c *AppConfig) { c.DailyPushTime = text; c.SetupStep = 4 })
+		SendMessage(chatID, "✅ Push time saved.\nPlease set the billing timezone (IANA format).\nExample: `America/New_York`, `Asia/Shanghai`, `UTC`\n\nThis determines when your billing cycle resets. It does NOT change your system clock.")
+	case 4:
+		tz := strings.TrimSpace(text)
+		if _, err := time.LoadLocation(tz); err != nil {
+			SendMessage(chatID, "❌ Invalid timezone. Use IANA format like `America/New_York`, `Asia/Shanghai`, or `UTC`.")
+			return
+		}
+		UpdateConfig(func(c *AppConfig) { c.Timezone = tz; c.SetupStep = 0 })
+		SendMessage(chatID, fmt.Sprintf("🎉 Setup complete! Timezone set to `%s`.\nTraffic monitoring is now active. Use /status to check current usage or /help for all commands.", tz))
 	}
 }
 
@@ -157,7 +165,7 @@ func handleHelp(chatID int64) {
 /calibrate - Set calibration factor
 /config - View current settings
 /report - Send an immediate daily report
-/settings - Reconfigure (bandwidth/reset day/push time)
+/settings - Reconfigure (bandwidth/reset day/push time/timezone)
 /help - Show this help message`
 	SendMessage(chatID, help)
 }
@@ -169,8 +177,12 @@ func handleSettings(chatID int64) {
 
 func handleConfig(chatID int64) {
 	cfg, _ := GetConfig()
-	reply := fmt.Sprintf("⚙️ *Current Settings*\n\nBandwidth Quota: %s\nReset Day: %d of each month\nPush Time: %s\nCalibration Factor: %.4f",
-		FormatBytes(cfg.TotalBandwidth), cfg.ResetDay, cfg.DailyPushTime, cfg.CalibrationFactor)
+	tzDisplay := cfg.Timezone
+	if tzDisplay == "" {
+		tzDisplay = "System Local"
+	}
+	reply := fmt.Sprintf("⚙️ *Current Settings*\n\nBandwidth Quota: %s\nReset Day: %d of each month\nPush Time: %s\nTimezone: %s\nCalibration Factor: %.4f",
+		FormatBytes(cfg.TotalBandwidth), cfg.ResetDay, cfg.DailyPushTime, tzDisplay, cfg.CalibrationFactor)
 	SendMessage(chatID, reply)
 }
 
@@ -182,7 +194,7 @@ func handleSync(env *AppEnv, chatID int64, text string) {
 		handleSyncInput(env, chatID, parts[1]+" "+parts[2])
 		return
 	}
-	UpdateConfig(func(c *AppConfig) { c.SetupStep = 4 })
+	UpdateConfig(func(c *AppConfig) { c.SetupStep = 5 })
 	SendMessage(chatID, "🔄 *Manual Sync*\n\nEnter the total usage shown on your VPS panel (MB / GB / TB).\nExample: `6.81 GB`\n\nSend /cancel to abort")
 }
 
@@ -195,7 +207,7 @@ func handleSyncInput(env *AppEnv, chatID int64, text string) {
 
 	SyncVnStatToDB(env.InterfaceName)
 	cfg, _ := GetConfig()
-	start, end := GetCycleDates(cfg.ResetDay)
+	start, end := GetCycleDates(cfg.ResetDay, cfg.Timezone)
 	cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
 
 	// What user currently sees
@@ -217,11 +229,8 @@ func handleSyncInput(env *AppEnv, chatID int64, text string) {
 		FormatBytes(actual), FormatBytes(oldTotal))
 
 	// Recommend factor only when meaningful:
-	// oldTotal must be from pure vnStat (no previous sync offset), and differ from actual
-	// Use oldTotal (what user saw before sync) vs actual (what panel says)
 	if oldTotal > 0 && cfg.UsageOffset == 0 {
 		suggested := actual / oldTotal
-		// Only recommend if there's a meaningful difference (>1%)
 		diff := suggested - 1.0
 		if diff < 0 {
 			diff = -diff
@@ -229,7 +238,7 @@ func handleSyncInput(env *AppEnv, chatID int64, text string) {
 		if diff > 0.01 {
 			reply += fmt.Sprintf("\n\nSuggested calibration factor: %.4f\nReply *yes* to apply, or anything else to skip", suggested)
 			pendingFactor = suggested
-			UpdateConfig(func(c *AppConfig) { c.SetupStep = 6 })
+			UpdateConfig(func(c *AppConfig) { c.SetupStep = 7 })
 		}
 	}
 
@@ -244,7 +253,7 @@ func handleCalibrate(env *AppEnv, chatID int64, text string) {
 	// Show current state first
 	SyncVnStatToDB(env.InterfaceName)
 	cfg, _ := GetConfig()
-	start, end := GetCycleDates(cfg.ResetDay)
+	start, end := GetCycleDates(cfg.ResetDay, cfg.Timezone)
 	cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
 
 	// Direct set: /calibrate 1.25
@@ -265,7 +274,7 @@ func handleCalibrate(env *AppEnv, chatID int64, text string) {
 		cfg.CalibrationFactor, FormatBytes(totalUsed), FormatBytes(float64(cycleBytes)))
 
 	info += "\n\nEnter calibration factor (e.g. `1.25` means local stats are low, multiply by 1.25)\nSend /cancel to abort"
-	UpdateConfig(func(c *AppConfig) { c.SetupStep = 5 })
+	UpdateConfig(func(c *AppConfig) { c.SetupStep = 6 })
 	SendMessage(chatID, info)
 }
 
@@ -319,7 +328,7 @@ func handleStatus(env *AppEnv, chatID int64) {
 	cfg, _ := GetConfig()
 	SyncVnStatToDB(env.InterfaceName)
 
-	start, end := GetCycleDates(cfg.ResetDay)
+	start, end := GetCycleDates(cfg.ResetDay, cfg.Timezone)
 	startStr := start.Format("2006-01-02")
 	endStr := end.Format("2006-01-02")
 	cycleBytes, _ := GetCycleTraffic(startStr, endStr)
@@ -329,7 +338,7 @@ func handleStatus(env *AppEnv, chatID int64) {
 	if cfg.TotalBandwidth > 0 {
 		percent = totalUsed / cfg.TotalBandwidth * 100
 	}
-	daysLeft := DaysUntilReset(cfg.ResetDay)
+	daysLeft := DaysUntilReset(cfg.ResetDay, cfg.Timezone)
 	bar := ProgressBar(percent, 20)
 
 	reply := fmt.Sprintf("📊 *Traffic Status*\n\n%s %.1f%%\n\nUsed: %s / %s\nBilling Cycle: %s ~ %s\nDays until reset: %d",
@@ -347,9 +356,9 @@ func handleDaily(env *AppEnv, chatID int64) {
 	cfg, _ := GetConfig()
 	SyncVnStatToDB(env.InterfaceName)
 
-	start, end := GetCycleDates(cfg.ResetDay)
+	start, end := GetCycleDates(cfg.ResetDay, cfg.Timezone)
 	startStr := start.Format("2006-01-02")
-	today := time.Now().Format("2006-01-02")
+	today := NowInZone(cfg.Timezone).Format("2006-01-02")
 	endStr := today
 	if end.Format("2006-01-02") < today {
 		endStr = end.Format("2006-01-02")

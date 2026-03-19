@@ -124,7 +124,7 @@ func fetchVnStat1Current(iface string, rawOutput []byte) ([]VnStatDayEntry, erro
 	if currx == 0 && curtx == 0 {
 		return nil, nil
 	}
-	today := time.Now().Format("2006-01-02")
+	today := time.Now().Format("2006-01-02") // system time is fine for vnStat data timestamp
 	return []VnStatDayEntry{{
 		Date:    today,
 		RxBytes: currx,

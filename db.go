@@ -12,10 +12,11 @@ type AppConfig struct {
 	TotalBandwidth    float64 // Total quota in bytes
 	ResetDay          int
 	DailyPushTime     string  // "HH:MM"
+	Timezone          string  // IANA timezone, e.g. "America/New_York"
 	UsageOffset       float64 // sync差值 = sync值 - vnStat周期累计，新周期清零
 	CalibrationFactor float64 // 倍率，默认 1.0
 	LastAlertPercent  int
-	SetupStep         int    // 0=complete, 1-3=wizard, 4=sync input, 5=calibrate input, 6=calibrate confirm
+	SetupStep         int    // 0=complete, 1-4=wizard, 5=sync input, 6=calibrate input, 7=calibrate confirm
 	LastResetCycle    string // 上次重置对应的周期起始日 "YYYY-MM-DD"，防止重复重置
 }
 
@@ -64,6 +65,7 @@ func InitDB(dbPath string) error {
 		"ALTER TABLE app_config ADD COLUMN usage_offset REAL DEFAULT 0",
 		"ALTER TABLE app_config ADD COLUMN calibration_factor REAL DEFAULT 1.0",
 		"ALTER TABLE app_config ADD COLUMN last_reset_cycle VARCHAR DEFAULT ''",
+		"ALTER TABLE app_config ADD COLUMN timezone VARCHAR DEFAULT ''",
 	}
 	for _, m := range migrations {
 		db.Exec(m)
@@ -74,10 +76,10 @@ func InitDB(dbPath string) error {
 func GetConfig() (*AppConfig, error) {
 	cfg := &AppConfig{}
 	err := db.QueryRow(`SELECT total_bandwidth, reset_day, daily_push_time,
-		usage_offset, calibration_factor, last_alert_percentage, setup_step,
+		COALESCE(timezone, ''), usage_offset, calibration_factor, last_alert_percentage, setup_step,
 		COALESCE(last_reset_cycle, '') FROM app_config WHERE id=1`).
 		Scan(&cfg.TotalBandwidth, &cfg.ResetDay, &cfg.DailyPushTime,
-			&cfg.UsageOffset, &cfg.CalibrationFactor,
+			&cfg.Timezone, &cfg.UsageOffset, &cfg.CalibrationFactor,
 			&cfg.LastAlertPercent, &cfg.SetupStep, &cfg.LastResetCycle)
 	return cfg, err
 }
@@ -89,10 +91,10 @@ func UpdateConfig(fn func(cfg *AppConfig)) error {
 	}
 	fn(cfg)
 	_, err = db.Exec(`UPDATE app_config SET total_bandwidth=?, reset_day=?, daily_push_time=?,
-		usage_offset=?, calibration_factor=?, last_alert_percentage=?, setup_step=?,
+		timezone=?, usage_offset=?, calibration_factor=?, last_alert_percentage=?, setup_step=?,
 		last_reset_cycle=? WHERE id=1`,
 		cfg.TotalBandwidth, cfg.ResetDay, cfg.DailyPushTime,
-		cfg.UsageOffset, cfg.CalibrationFactor,
+		cfg.Timezone, cfg.UsageOffset, cfg.CalibrationFactor,
 		cfg.LastAlertPercent, cfg.SetupStep, cfg.LastResetCycle)
 	return err
 }
@@ -140,8 +142,8 @@ func CleanOldData(beforeDate string) error {
 	return err
 }
 
-func GetYesterdayTraffic() (int64, error) {
-	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+func GetYesterdayTraffic(tz string) (int64, error) {
+	yesterday := NowInZone(tz).AddDate(0, 0, -1).Format("2006-01-02")
 	var total sql.NullInt64
 	err := db.QueryRow(`SELECT rx_bytes + tx_bytes FROM daily_traffic_log WHERE record_date = ?`, yesterday).Scan(&total)
 	if err == sql.ErrNoRows {

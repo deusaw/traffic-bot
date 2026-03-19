@@ -23,7 +23,7 @@ func dailyReportLoop(env *AppEnv) {
 			continue
 		}
 
-		now := time.Now()
+		now := NowInZone(cfg.Timezone)
 		todayStr := now.Format("2006-01-02")
 		currentTime := now.Format("15:04")
 
@@ -42,11 +42,11 @@ func sendDailyReport(env *AppEnv, cfg *AppConfig) {
 		log.Printf("日报同步失败: %v", err)
 	}
 
-	yesterdayBytes, _ := GetYesterdayTraffic()
-	start, end := GetCycleDates(cfg.ResetDay)
+	yesterdayBytes, _ := GetYesterdayTraffic(cfg.Timezone)
+	start, end := GetCycleDates(cfg.ResetDay, cfg.Timezone)
 	cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
 	totalUsed := CalcTotalUsed(cfg, cycleBytes)
-	daysLeft := DaysUntilReset(cfg.ResetDay)
+	daysLeft := DaysUntilReset(cfg.ResetDay, cfg.Timezone)
 
 	percent := 0.0
 	if cfg.TotalBandwidth > 0 {
@@ -69,7 +69,7 @@ Days until reset: %d`,
 }
 
 func runDataCleanup(cfg *AppConfig) {
-	prevStart := GetPrevCycleStart(cfg.ResetDay)
+	prevStart := GetPrevCycleStart(cfg.ResetDay, cfg.Timezone)
 	if err := CleanOldData(prevStart.Format("2006-01-02")); err != nil {
 		log.Printf("数据清理失败: %v", err)
 	} else {
@@ -80,7 +80,7 @@ func runDataCleanup(cfg *AppConfig) {
 // resetAlertIfNewCycle resets alert and offset when a NEW billing cycle begins.
 // Compares current cycle start date with last recorded reset cycle to ensure one-time reset.
 func resetAlertIfNewCycle(cfg *AppConfig) {
-	start, _ := GetCycleDates(cfg.ResetDay)
+	start, _ := GetCycleDates(cfg.ResetDay, cfg.Timezone)
 	cycleStart := start.Format("2006-01-02")
 
 	// Only reset if this is a different cycle than the last one we reset for
@@ -107,7 +107,7 @@ func alertCheckLoop(env *AppEnv) {
 		// Sync data
 		SyncVnStatToDB(env.InterfaceName)
 
-		start, end := GetCycleDates(cfg.ResetDay)
+		start, end := GetCycleDates(cfg.ResetDay, cfg.Timezone)
 		cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
 		totalUsed := CalcTotalUsed(cfg, cycleBytes)
 
