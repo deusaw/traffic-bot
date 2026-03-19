@@ -201,13 +201,17 @@ func handleSyncInput(env *AppEnv, chatID int64, text string) {
 	reply := fmt.Sprintf("✅ 已同步！当前周期用量已覆盖为 %s\n覆盖前统计：%s",
 		FormatBytes(actual), FormatBytes(oldTotal))
 
-	// Recommend factor if local data exists
-	if cycleBytes > 0 {
-		suggested := actual / float64(cycleBytes)
-		reply += fmt.Sprintf("\n\n推荐校准倍率：%.4f\n回复 *是* 应用此倍率，或发送其他内容跳过",
-			suggested)
-		pendingFactor = suggested
-		UpdateConfig(func(c *AppConfig) { c.SetupStep = 6 })
+	// Recommend factor based on incremental comparison (only if previously synced)
+	if cfg.SyncUsage > 0 && float64(cycleBytes) > cfg.SyncLocalBase {
+		panelIncrement := actual - cfg.SyncUsage          // 面板增量
+		localIncrement := float64(cycleBytes) - cfg.SyncLocalBase // vnStat 增量
+		if localIncrement > 0 && panelIncrement > 0 {
+			suggested := panelIncrement / localIncrement
+			reply += fmt.Sprintf("\n\n面板增量：%s\n本地增量：%s\n推荐校准倍率：%.4f\n回复 *是* 应用此倍率，或发送其他内容跳过",
+				FormatBytes(panelIncrement), FormatBytes(localIncrement), suggested)
+			pendingFactor = suggested
+			UpdateConfig(func(c *AppConfig) { c.SetupStep = 6 })
+		}
 	}
 
 	SendMessage(chatID, reply)
