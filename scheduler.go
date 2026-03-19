@@ -23,7 +23,9 @@ func dailyReportLoop(env *AppEnv) {
 			continue
 		}
 
-		now := NowInZone(cfg.Timezone)
+		// Push time uses system local clock (user's real time)
+		// Billing cycle dates use cfg.Timezone (provider's reset timezone)
+		now := time.Now()
 		todayStr := now.Format("2006-01-02")
 		currentTime := now.Format("15:04")
 
