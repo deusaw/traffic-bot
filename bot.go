@@ -59,16 +59,25 @@ func handleMessage(env *AppEnv, msg *tgbotapi.Message) {
 
 	text := strings.TrimSpace(msg.Text)
 
-	// If in setup wizard, handle wizard steps (except /start which restarts it)
+	// If in setup wizard (1-3) or awaiting calibrate input (4)
 	if cfg.SetupStep > 0 {
 		if text == "/start" {
-			// Restart wizard
 			UpdateConfig(func(c *AppConfig) { c.SetupStep = 1 })
 			SendMessage(msg.Chat.ID, "欢迎使用！请先设置您的套餐每月总流量配额 (支持 GB 或 TB)。\n格式示例：500 GB 或 1 TB")
 			return
 		}
-		if strings.HasPrefix(text, "/") {
+		// Allow /cancel to exit calibrate mode
+		if cfg.SetupStep == 4 && text == "/cancel" {
+			UpdateConfig(func(c *AppConfig) { c.SetupStep = 0 })
+			SendMessage(msg.Chat.ID, "已取消校准。")
+			return
+		}
+		if strings.HasPrefix(text, "/") && cfg.SetupStep != 4 {
 			SendMessage(msg.Chat.ID, "⏳ 请先完成初始化设置，再使用其他指令。")
+			return
+		}
+		if cfg.SetupStep == 4 {
+			handleCalibrateInput(env, msg.Chat.ID, text)
 			return
 		}
 		handleWizard(msg.Chat.ID, cfg, text)
@@ -230,30 +239,21 @@ func handleSettings(chatID int64) {
 }
 
 func handleCalibrate(env *AppEnv, chatID int64, text string) {
-	// Expected: /calibrate 450 GB
 	parts := strings.Fields(text)
-	if len(parts) != 3 {
-		SendMessage(chatID, "❌ 格式：/calibrate <数值> <GB|TB>\n例如：/calibrate 450 GB")
+	if len(parts) == 3 {
+		// Inline: /calibrate 450 GB
+		handleCalibrateInput(env, chatID, parts[1]+" "+parts[2])
 		return
 	}
+	// Enter conversational mode
+	UpdateConfig(func(c *AppConfig) { c.SetupStep = 4 })
+	SendMessage(chatID, "请输入当前实际已用流量（支持 MB / GB / TB）。\n格式示例：6.81 GB\n\n发送 /cancel 取消")
+}
 
-	val, err := strconv.ParseFloat(parts[1], 64)
+func handleCalibrateInput(env *AppEnv, chatID int64, text string) {
+	bw, err := parseBandwidthAllUnits(text)
 	if err != nil {
-		SendMessage(chatID, "❌ 数值格式错误。")
-		return
-	}
-
-	unit := strings.ToUpper(parts[2])
-	var actualBytes float64
-	switch unit {
-	case "GB":
-		actualBytes = val * bytesPerGB
-	case "TB":
-		actualBytes = val * bytesPerTB
-	case "MB":
-		actualBytes = val * bytesPerMB
-	default:
-		SendMessage(chatID, "❌ 单位仅支持 MB / GB / TB。")
+		SendMessage(chatID, "❌ 格式错误，请输入如：6.81 GB 或 1.5 TB")
 		return
 	}
 
@@ -263,13 +263,38 @@ func handleCalibrate(env *AppEnv, chatID int64, text string) {
 	start, end := GetCycleDates(cfg.ResetDay)
 	cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
 
-	offset := actualBytes - float64(cycleBytes)
-	UpdateConfig(func(c *AppConfig) { c.CalibrationOffset = offset })
+	offset := bw - float64(cycleBytes)
+	UpdateConfig(func(c *AppConfig) {
+		c.CalibrationOffset = offset
+		c.SetupStep = 0
+	})
 
 	SendMessage(chatID, fmt.Sprintf("✅ 校准完成！\n本地统计：%s\n实际用量：%s\n偏移量：%s",
 		FormatBytes(float64(cycleBytes)),
-		FormatBytes(actualBytes),
+		FormatBytes(bw),
 		FormatBytes(offset)))
+}
+
+// parseBandwidthAllUnits parses "6.81 GB", "500 MB", "1 TB" into bytes.
+func parseBandwidthAllUnits(text string) (float64, error) {
+	parts := strings.Fields(strings.TrimSpace(text))
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("invalid format")
+	}
+	val, err := strconv.ParseFloat(parts[0], 64)
+	if err != nil || val < 0 {
+		return 0, fmt.Errorf("invalid number")
+	}
+	switch strings.ToUpper(parts[1]) {
+	case "MB":
+		return val * bytesPerMB, nil
+	case "GB":
+		return val * bytesPerGB, nil
+	case "TB":
+		return val * bytesPerTB, nil
+	default:
+		return 0, fmt.Errorf("unsupported unit")
+	}
 }
 
 // parseBandwidth parses "500 GB" or "1 TB" into bytes.
