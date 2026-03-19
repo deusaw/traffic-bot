@@ -9,12 +9,14 @@ import (
 
 // AppConfig maps to the app_config table (single-row).
 type AppConfig struct {
-	TotalBandwidth     float64 // Total quota in bytes
-	ResetDay           int
-	DailyPushTime      string // "HH:MM"
-	CalibrationOffset  float64 // Offset in bytes, can be negative
-	LastAlertPercent   int     // Highest alert threshold sent this cycle
-	SetupStep          int     // 0=complete, 1=awaiting bandwidth, 2=awaiting reset day, 3=awaiting push time
+	TotalBandwidth    float64 // Total quota in bytes
+	ResetDay          int
+	DailyPushTime     string  // "HH:MM"
+	SyncUsage         float64 // /sync 设定的面板实际用量 (bytes)，0 表示未同步
+	SyncLocalBase     float64 // /sync 时的本地 vnStat 统计值 (bytes)，用于计算增量
+	CalibrationFactor float64 // 倍率，默认 1.0，乘以本地统计得到修正值
+	LastAlertPercent  int     // Highest alert threshold sent this cycle
+	SetupStep         int     // 0=complete, 1-3=wizard, 4=sync input, 5=calibrate input, 6=calibrate confirm
 }
 
 // DailyTrafficLog maps to the daily_traffic_log table.
@@ -39,7 +41,9 @@ func InitDB(dbPath string) error {
 		total_bandwidth REAL DEFAULT 0,
 		reset_day INTEGER DEFAULT 1,
 		daily_push_time VARCHAR DEFAULT '08:00',
-		calibration_offset REAL DEFAULT 0,
+		sync_usage REAL DEFAULT 0,
+		sync_local_base REAL DEFAULT 0,
+		calibration_factor REAL DEFAULT 1.0,
 		last_alert_percentage INTEGER DEFAULT 0,
 		setup_step INTEGER DEFAULT 1
 	);
@@ -54,16 +58,32 @@ func InitDB(dbPath string) error {
 	);`
 
 	_, err = db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Auto-migrate: add new columns if upgrading from old schema
+	migrations := []string{
+		"ALTER TABLE app_config ADD COLUMN sync_usage REAL DEFAULT 0",
+		"ALTER TABLE app_config ADD COLUMN sync_local_base REAL DEFAULT 0",
+		"ALTER TABLE app_config ADD COLUMN calibration_factor REAL DEFAULT 1.0",
+	}
+	for _, m := range migrations {
+		db.Exec(m) // ignore errors (column already exists)
+	}
+	// Remove old column data if present (calibration_offset is no longer used)
+
+	return nil
 }
 
 // GetConfig reads the single-row app_config.
 func GetConfig() (*AppConfig, error) {
 	cfg := &AppConfig{}
 	err := db.QueryRow(`SELECT total_bandwidth, reset_day, daily_push_time,
-		calibration_offset, last_alert_percentage, setup_step FROM app_config WHERE id=1`).
+		sync_usage, sync_local_base, calibration_factor, last_alert_percentage, setup_step FROM app_config WHERE id=1`).
 		Scan(&cfg.TotalBandwidth, &cfg.ResetDay, &cfg.DailyPushTime,
-			&cfg.CalibrationOffset, &cfg.LastAlertPercent, &cfg.SetupStep)
+			&cfg.SyncUsage, &cfg.SyncLocalBase, &cfg.CalibrationFactor,
+			&cfg.LastAlertPercent, &cfg.SetupStep)
 	return cfg, err
 }
 
@@ -75,9 +95,10 @@ func UpdateConfig(fn func(cfg *AppConfig)) error {
 	}
 	fn(cfg)
 	_, err = db.Exec(`UPDATE app_config SET total_bandwidth=?, reset_day=?, daily_push_time=?,
-		calibration_offset=?, last_alert_percentage=?, setup_step=? WHERE id=1`,
+		sync_usage=?, sync_local_base=?, calibration_factor=?, last_alert_percentage=?, setup_step=? WHERE id=1`,
 		cfg.TotalBandwidth, cfg.ResetDay, cfg.DailyPushTime,
-		cfg.CalibrationOffset, cfg.LastAlertPercent, cfg.SetupStep)
+		cfg.SyncUsage, cfg.SyncLocalBase, cfg.CalibrationFactor,
+		cfg.LastAlertPercent, cfg.SetupStep)
 	return err
 }
 
@@ -144,4 +165,32 @@ func GetYesterdayTraffic() (int64, error) {
 		return 0, nil
 	}
 	return total.Int64, nil
+}
+
+// CalcTotalUsed computes the effective total used traffic for display and alerts.
+// If sync was done: sync_usage + (current_local - sync_local_base) * factor
+// If no sync: current_local * factor
+func CalcTotalUsed(cfg *AppConfig, localCycleBytes int64) float64 {
+	factor := cfg.CalibrationFactor
+	if factor <= 0 {
+		factor = 1.0
+	}
+
+	var total float64
+	if cfg.SyncUsage > 0 {
+		// Sync mode: base + incremental since sync
+		increment := float64(localCycleBytes) - cfg.SyncLocalBase
+		if increment < 0 {
+			increment = 0
+		}
+		total = cfg.SyncUsage + increment*factor
+	} else {
+		// No sync: pure local * factor
+		total = float64(localCycleBytes) * factor
+	}
+
+	if total < 0 {
+		total = 0
+	}
+	return total
 }

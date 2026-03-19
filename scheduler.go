@@ -45,10 +45,7 @@ func sendDailyReport(env *AppEnv, cfg *AppConfig) {
 	yesterdayBytes, _ := GetYesterdayTraffic()
 	start, end := GetCycleDates(cfg.ResetDay)
 	cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
-	totalUsed := float64(cycleBytes) + cfg.CalibrationOffset
-	if totalUsed < 0 {
-		totalUsed = 0
-	}
+	totalUsed := CalcTotalUsed(cfg, cycleBytes)
 	daysLeft := DaysUntilReset(cfg.ResetDay)
 
 	percent := 0.0
@@ -61,7 +58,7 @@ func sendDailyReport(env *AppEnv, cfg *AppConfig) {
 昨日消耗：%s
 当前周期累计：%s / %s (%.1f%%)
 距离下次重置：%d 天`,
-		FormatBytes(float64(yesterdayBytes)),
+		FormatBytes(float64(yesterdayBytes)*cfg.CalibrationFactor),
 		FormatBytes(totalUsed),
 		FormatBytes(cfg.TotalBandwidth),
 		percent,
@@ -85,8 +82,12 @@ func resetAlertIfNewCycle(cfg *AppConfig) {
 	start, _ := GetCycleDates(cfg.ResetDay)
 	// If today is the reset day, reset alert
 	if time.Now().Day() == start.Day() && time.Now().Month() == start.Month() {
-		UpdateConfig(func(c *AppConfig) { c.LastAlertPercent = 0 })
-		log.Println("新计费周期，告警百分比已重置")
+		UpdateConfig(func(c *AppConfig) {
+			c.LastAlertPercent = 0
+			c.SyncUsage = 0
+			c.SyncLocalBase = 0
+		})
+		log.Println("新计费周期，告警百分比和同步数据已重置")
 	}
 }
 
@@ -105,10 +106,7 @@ func alertCheckLoop(env *AppEnv) {
 
 		start, end := GetCycleDates(cfg.ResetDay)
 		cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
-		totalUsed := float64(cycleBytes) + cfg.CalibrationOffset
-		if totalUsed < 0 {
-			totalUsed = 0
-		}
+		totalUsed := CalcTotalUsed(cfg, cycleBytes)
 
 		percent := totalUsed / cfg.TotalBandwidth * 100
 

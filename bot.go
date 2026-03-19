@@ -31,7 +31,6 @@ func SendMessage(chatID int64, text string) {
 	}
 }
 
-// StartPolling begins the main update loop.
 func StartPolling(env *AppEnv) {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
@@ -41,7 +40,6 @@ func StartPolling(env *AppEnv) {
 		if update.Message == nil {
 			continue
 		}
-		// Auth check
 		if update.Message.Chat.ID != env.AuthChatID {
 			log.Printf("未授权访问: ChatID=%d", update.Message.Chat.ID)
 			continue
@@ -49,6 +47,9 @@ func StartPolling(env *AppEnv) {
 		handleMessage(env, update.Message)
 	}
 }
+
+// pendingFactor stores proposed calibration factor between steps 5→6.
+var pendingFactor float64
 
 func handleMessage(env *AppEnv, msg *tgbotapi.Message) {
 	cfg, err := GetConfig()
@@ -59,32 +60,32 @@ func handleMessage(env *AppEnv, msg *tgbotapi.Message) {
 
 	text := strings.TrimSpace(msg.Text)
 
-	// If in setup wizard (1-3) or calibrate flow (4=input, 5=confirm)
+	// Interactive steps: 1-3=wizard, 4=sync input, 5=calibrate input, 6=calibrate confirm
 	if cfg.SetupStep > 0 {
 		if text == "/start" {
 			UpdateConfig(func(c *AppConfig) { c.SetupStep = 1 })
 			SendMessage(msg.Chat.ID, "欢迎使用！请先设置您的套餐每月总流量配额 (支持 GB 或 TB)。\n格式示例：500 GB 或 1 TB")
 			return
 		}
-		// Allow /cancel to exit calibrate mode
-		if (cfg.SetupStep == 4 || cfg.SetupStep == 5) && text == "/cancel" {
+		if text == "/cancel" && cfg.SetupStep >= 4 {
 			UpdateConfig(func(c *AppConfig) { c.SetupStep = 0 })
-			SendMessage(msg.Chat.ID, "已取消同步。")
+			SendMessage(msg.Chat.ID, "已取消操作。")
 			return
 		}
 		if strings.HasPrefix(text, "/") && cfg.SetupStep <= 3 {
 			SendMessage(msg.Chat.ID, "⏳ 请先完成初始化设置，再使用其他指令。")
 			return
 		}
-		if cfg.SetupStep == 4 {
+		switch cfg.SetupStep {
+		case 1, 2, 3:
+			handleWizard(msg.Chat.ID, cfg, text)
+		case 4:
+			handleSyncInput(env, msg.Chat.ID, text)
+		case 5:
 			handleCalibrateInput(env, msg.Chat.ID, text)
-			return
+		case 6:
+			handleCalibrateConfirm(msg.Chat.ID, text)
 		}
-		if cfg.SetupStep == 5 {
-			handleCalibrateConfirm(env, msg.Chat.ID, text)
-			return
-		}
-		handleWizard(msg.Chat.ID, cfg, text)
 		return
 	}
 
@@ -98,41 +99,34 @@ func handleMessage(env *AppEnv, msg *tgbotapi.Message) {
 		handleDaily(env, msg.Chat.ID)
 	case text == "/settings":
 		handleSettings(msg.Chat.ID)
+	case strings.HasPrefix(text, "/sync"):
+		handleSync(env, msg.Chat.ID, text)
 	case strings.HasPrefix(text, "/calibrate"):
 		handleCalibrate(env, msg.Chat.ID, text)
 	default:
-		// Could be a settings update if setup_step was set by /settings
 		SendMessage(msg.Chat.ID, "未知指令，请使用 /help 查看可用命令。")
 	}
 }
 
 func handleWizard(chatID int64, cfg *AppConfig, text string) {
 	switch cfg.SetupStep {
-	case 1: // Awaiting total bandwidth
+	case 1:
 		bw, err := parseBandwidth(text)
 		if err != nil {
 			SendMessage(chatID, "❌ 格式错误，请输入如：500 GB 或 1 TB")
 			return
 		}
-		UpdateConfig(func(c *AppConfig) {
-			c.TotalBandwidth = bw
-			c.SetupStep = 2
-		})
+		UpdateConfig(func(c *AppConfig) { c.TotalBandwidth = bw; c.SetupStep = 2 })
 		SendMessage(chatID, "✅ 总流量已保存。\n请设置每月的流量重置日期 (1-31)。\n格式示例：15")
-
-	case 2: // Awaiting reset day
+	case 2:
 		day, err := strconv.Atoi(text)
 		if err != nil || day < 1 || day > 31 {
 			SendMessage(chatID, "❌ 请输入 1-31 之间的数字。")
 			return
 		}
-		UpdateConfig(func(c *AppConfig) {
-			c.ResetDay = day
-			c.SetupStep = 3
-		})
+		UpdateConfig(func(c *AppConfig) { c.ResetDay = day; c.SetupStep = 3 })
 		SendMessage(chatID, "✅ 重置日已保存。\n请设置每天接收流量日报的时间 (24小时制 HH:MM)。\n格式示例：08:30")
-
-	case 3: // Awaiting push time
+	case 3:
 		matched, _ := regexp.MatchString(`^\d{2}:\d{2}$`, text)
 		if !matched {
 			SendMessage(chatID, "❌ 格式错误，请输入如：08:30")
@@ -145,10 +139,7 @@ func handleWizard(chatID int64, cfg *AppConfig, text string) {
 			SendMessage(chatID, "❌ 时间无效，小时 0-23，分钟 0-59。")
 			return
 		}
-		UpdateConfig(func(c *AppConfig) {
-			c.DailyPushTime = text
-			c.SetupStep = 0
-		})
+		UpdateConfig(func(c *AppConfig) { c.DailyPushTime = text; c.SetupStep = 0 })
 		SendMessage(chatID, "🎉 配置完成！系统已开始监控您的 VPS 流量。您随时可以使用 /status 查看当前状态，或使用 /help 查看更多指令。")
 	}
 }
@@ -158,27 +149,147 @@ func handleHelp(chatID int64) {
 
 /status - 查看当前计费周期流量状态
 /daily - 查看当前周期每日流量明细
+/sync - 手动同步面板实际用量
+/calibrate - 设置流量校准倍率
 /settings - 重新配置（总流量/重置日/推送时间）
-/calibrate - 同步面板实际用量（自动计算偏移量）
 /help - 显示此帮助信息`
 	SendMessage(chatID, help)
 }
 
+func handleSettings(chatID int64) {
+	UpdateConfig(func(c *AppConfig) { c.SetupStep = 1 })
+	SendMessage(chatID, "请设置您的套餐每月总流量配额 (支持 GB 或 TB)。\n格式示例：500 GB 或 1 TB")
+}
+
+// ==================== /sync ====================
+
+func handleSync(env *AppEnv, chatID int64, text string) {
+	parts := strings.Fields(text)
+	if len(parts) == 3 {
+		handleSyncInput(env, chatID, parts[1]+" "+parts[2])
+		return
+	}
+	UpdateConfig(func(c *AppConfig) { c.SetupStep = 4 })
+	SendMessage(chatID, "🔄 *手动同步*\n\n请输入 VPS 面板上显示的当前周期已用总流量（支持 MB / GB / TB）。\n格式示例：`6.81 GB`\n\n发送 /cancel 取消")
+}
+
+func handleSyncInput(env *AppEnv, chatID int64, text string) {
+	actual, err := parseBandwidthAllUnits(text)
+	if err != nil {
+		SendMessage(chatID, "❌ 格式错误，请输入如：`6.81 GB` 或 `1.5 TB`")
+		return
+	}
+
+	SyncVnStatToDB(env.InterfaceName)
+	cfg, _ := GetConfig()
+	start, end := GetCycleDates(cfg.ResetDay)
+	cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
+
+	UpdateConfig(func(c *AppConfig) {
+		c.SyncUsage = actual
+		c.SyncLocalBase = float64(cycleBytes)
+		c.SetupStep = 0
+	})
+
+	// If local data exists, suggest a calibration factor
+	reply := fmt.Sprintf("✅ 已同步！当前周期用量已设为 %s", FormatBytes(actual))
+	if cycleBytes > 0 {
+		suggestedFactor := actual / float64(cycleBytes)
+		reply += fmt.Sprintf("\n\n本地统计：%s\n建议校准倍率：%.4f\n如需应用，请使用 /calibrate",
+			FormatBytes(float64(cycleBytes)), suggestedFactor)
+	}
+	SendMessage(chatID, reply)
+}
+
+// ==================== /calibrate ====================
+
+func handleCalibrate(env *AppEnv, chatID int64, text string) {
+	parts := strings.Fields(text)
+
+	// Show current state first
+	SyncVnStatToDB(env.InterfaceName)
+	cfg, _ := GetConfig()
+	start, end := GetCycleDates(cfg.ResetDay)
+	cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
+
+	// Direct set: /calibrate 1.25
+	if len(parts) == 2 {
+		factor, err := strconv.ParseFloat(parts[1], 64)
+		if err != nil || factor <= 0 {
+			SendMessage(chatID, "❌ 倍率必须是大于 0 的数字，如：1.25")
+			return
+		}
+		UpdateConfig(func(c *AppConfig) { c.CalibrationFactor = factor })
+		SendMessage(chatID, fmt.Sprintf("✅ 校准倍率已设为 %.4f", factor))
+		return
+	}
+
+	// Interactive mode
+	info := fmt.Sprintf("📐 *流量校准*\n\n当前倍率：%.4f\n本地统计：%s",
+		cfg.CalibrationFactor, FormatBytes(float64(cycleBytes)))
+
+	if cfg.SyncUsage > 0 && cycleBytes > 0 {
+		suggested := cfg.SyncUsage / float64(cycleBytes)
+		info += fmt.Sprintf("\n上次同步用量：%s\n建议倍率：%.4f\n\n回复 *是* 应用建议倍率，或输入自定义倍率（如 `1.25`）\n发送 /cancel 取消",
+			FormatBytes(cfg.SyncUsage), suggested)
+		pendingFactor = suggested
+		UpdateConfig(func(c *AppConfig) { c.SetupStep = 6 })
+	} else {
+		info += "\n\n请输入校准倍率（如 `1.25` 表示本地统计偏低需乘以1.25）\n发送 /cancel 取消"
+		UpdateConfig(func(c *AppConfig) { c.SetupStep = 5 })
+	}
+	SendMessage(chatID, info)
+}
+
+func handleCalibrateInput(env *AppEnv, chatID int64, text string) {
+	factor, err := strconv.ParseFloat(strings.TrimSpace(text), 64)
+	if err != nil || factor <= 0 {
+		SendMessage(chatID, "❌ 请输入大于 0 的数字，如：1.25")
+		return
+	}
+	UpdateConfig(func(c *AppConfig) {
+		c.CalibrationFactor = factor
+		c.SetupStep = 0
+	})
+	SendMessage(chatID, fmt.Sprintf("✅ 校准倍率已设为 %.4f", factor))
+}
+
+func handleCalibrateConfirm(chatID int64, text string) {
+	text = strings.TrimSpace(text)
+	if text == "是" || strings.ToLower(text) == "yes" || strings.ToLower(text) == "y" {
+		UpdateConfig(func(c *AppConfig) {
+			c.CalibrationFactor = pendingFactor
+			c.SetupStep = 0
+		})
+		SendMessage(chatID, fmt.Sprintf("✅ 校准倍率已设为 %.4f", pendingFactor))
+		return
+	}
+	// Try parsing as custom factor
+	factor, err := strconv.ParseFloat(text, 64)
+	if err == nil && factor > 0 {
+		UpdateConfig(func(c *AppConfig) {
+			c.CalibrationFactor = factor
+			c.SetupStep = 0
+		})
+		SendMessage(chatID, fmt.Sprintf("✅ 校准倍率已设为 %.4f", factor))
+		return
+	}
+	UpdateConfig(func(c *AppConfig) { c.SetupStep = 0 })
+	SendMessage(chatID, "已取消，倍率未变更。")
+}
+
+// ==================== /status & /daily ====================
+
 func handleStatus(env *AppEnv, chatID int64) {
 	cfg, _ := GetConfig()
-	// Sync latest data
 	SyncVnStatToDB(env.InterfaceName)
 
 	start, end := GetCycleDates(cfg.ResetDay)
 	startStr := start.Format("2006-01-02")
 	endStr := end.Format("2006-01-02")
-
 	cycleBytes, _ := GetCycleTraffic(startStr, endStr)
-	totalUsed := float64(cycleBytes) + cfg.CalibrationOffset
-	if totalUsed < 0 {
-		totalUsed = 0
-	}
 
+	totalUsed := CalcTotalUsed(cfg, cycleBytes)
 	percent := 0.0
 	if cfg.TotalBandwidth > 0 {
 		percent = totalUsed / cfg.TotalBandwidth * 100
@@ -186,20 +297,16 @@ func handleStatus(env *AppEnv, chatID int64) {
 	daysLeft := DaysUntilReset(cfg.ResetDay)
 	bar := ProgressBar(percent, 20)
 
-	reply := fmt.Sprintf(`📊 *流量状态*
-
-%s %.1f%%
-
-已用：%s / %s
-计费周期：%s ~ %s
-距离重置还有：%d 天`,
+	reply := fmt.Sprintf("📊 *流量状态*\n\n%s %.1f%%\n\n已用：%s / %s\n计费周期：%s ~ %s\n距离重置还有：%d 天",
 		bar, percent,
 		FormatBytes(totalUsed), FormatBytes(cfg.TotalBandwidth),
-		startStr, endStr,
-		daysLeft)
+		startStr, endStr, daysLeft)
 
-	if cfg.CalibrationOffset != 0 {
-		reply += fmt.Sprintf("\n校准偏移量：%s", FormatBytes(cfg.CalibrationOffset))
+	if cfg.CalibrationFactor != 1.0 {
+		reply += fmt.Sprintf("\n校准倍率：%.4f", cfg.CalibrationFactor)
+	}
+	if cfg.SyncUsage > 0 {
+		reply += fmt.Sprintf("\n同步基准：%s", FormatBytes(cfg.SyncUsage))
 	}
 	SendMessage(chatID, reply)
 }
@@ -222,109 +329,29 @@ func handleDaily(env *AppEnv, chatID int64) {
 		return
 	}
 
+	factor := cfg.CalibrationFactor
+	if factor <= 0 {
+		factor = 1.0
+	}
+
 	reply := "📅 *当前周期每日流量*\n\n"
 	var totalAll int64
 	for _, l := range logs {
 		dayTotal := l.RxBytes + l.TxBytes
 		totalAll += dayTotal
+		adjusted := float64(dayTotal) * factor
 		reply += fmt.Sprintf("`%s` | ↓%s ↑%s | 合计 %s\n",
 			l.RecordDate,
-			FormatBytes(float64(l.RxBytes)),
-			FormatBytes(float64(l.TxBytes)),
-			FormatBytes(float64(dayTotal)))
+			FormatBytes(float64(l.RxBytes)*factor),
+			FormatBytes(float64(l.TxBytes)*factor),
+			FormatBytes(adjusted))
 	}
-	reply += fmt.Sprintf("\n合计：%s", FormatBytes(float64(totalAll)))
+	reply += fmt.Sprintf("\n合计：%s", FormatBytes(float64(totalAll)*factor))
 	SendMessage(chatID, reply)
 }
 
-func handleSettings(chatID int64) {
-	UpdateConfig(func(c *AppConfig) { c.SetupStep = 1 })
-	SendMessage(chatID, "欢迎使用！请先设置您的套餐每月总流量配额 (支持 GB 或 TB)。\n格式示例：500 GB 或 1 TB")
-}
+// ==================== Parsers ====================
 
-func handleCalibrate(env *AppEnv, chatID int64, text string) {
-	parts := strings.Fields(text)
-	if len(parts) == 3 {
-		// Inline shortcut: /calibrate 6.81 GB — go straight to input handling
-		handleCalibrateInput(env, chatID, parts[1]+" "+parts[2])
-		return
-	}
-	// Enter conversational mode — step 4: awaiting actual usage input
-	UpdateConfig(func(c *AppConfig) { c.SetupStep = 4 })
-	SendMessage(chatID, "🔄 *流量同步*\n\n请输入 VPS 面板上显示的当前周期已用流量（支持 MB / GB / TB）。\n格式示例：`6.81 GB`\n\n发送 /cancel 取消")
-}
-
-// pendingOffset stores the proposed offset between conversational steps (step 4 → 5).
-var pendingOffset float64
-var pendingActual float64
-
-func handleCalibrateInput(env *AppEnv, chatID int64, text string) {
-	actual, err := parseBandwidthAllUnits(text)
-	if err != nil {
-		SendMessage(chatID, "❌ 格式错误，请输入如：`6.81 GB` 或 `1.5 TB`")
-		return
-	}
-
-	cfg, _ := GetConfig()
-	SyncVnStatToDB(env.InterfaceName)
-
-	start, end := GetCycleDates(cfg.ResetDay)
-	cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
-	localTotal := float64(cycleBytes) + cfg.CalibrationOffset
-	if localTotal < 0 {
-		localTotal = 0
-	}
-
-	offset := actual - float64(cycleBytes)
-	pendingOffset = offset
-	pendingActual = actual
-
-	diff := actual - localTotal
-
-	reply := fmt.Sprintf("📊 *同步对比*\n\n"+
-		"面板实际用量：%s\n"+
-		"本地统计用量：%s\n",
-		FormatBytes(actual),
-		FormatBytes(localTotal))
-
-	if cfg.CalibrationOffset != 0 {
-		reply += fmt.Sprintf("当前偏移量：%s\n", FormatBytes(cfg.CalibrationOffset))
-	}
-
-	if diff > 0 {
-		reply += fmt.Sprintf("差额：+%s\n", FormatBytes(diff))
-	} else if diff < 0 {
-		reply += fmt.Sprintf("差额：%s\n", FormatBytes(diff))
-	} else {
-		reply += "差额：无，数据一致 ✅\n"
-		UpdateConfig(func(c *AppConfig) { c.SetupStep = 0 })
-		SendMessage(chatID, reply+"\n无需校准。")
-		return
-	}
-
-	reply += fmt.Sprintf("\n建议偏移量：%s\n\n回复 *是* 应用此偏移量，或 /cancel 取消", FormatBytes(offset))
-
-	UpdateConfig(func(c *AppConfig) { c.SetupStep = 5 })
-	SendMessage(chatID, reply)
-}
-
-func handleCalibrateConfirm(env *AppEnv, chatID int64, text string) {
-	text = strings.TrimSpace(text)
-	if text == "是" || strings.ToLower(text) == "yes" || strings.ToLower(text) == "y" {
-		UpdateConfig(func(c *AppConfig) {
-			c.CalibrationOffset = pendingOffset
-			c.SetupStep = 0
-		})
-		SendMessage(chatID, fmt.Sprintf("✅ 同步完成！偏移量已设为 %s\n当前实际用量：%s",
-			FormatBytes(pendingOffset),
-			FormatBytes(pendingActual)))
-	} else {
-		UpdateConfig(func(c *AppConfig) { c.SetupStep = 0 })
-		SendMessage(chatID, "已取消同步，偏移量未变更。")
-	}
-}
-
-// parseBandwidthAllUnits parses "6.81 GB", "500 MB", "1 TB" into bytes.
 func parseBandwidthAllUnits(text string) (float64, error) {
 	parts := strings.Fields(strings.TrimSpace(text))
 	if len(parts) != 2 {
@@ -346,7 +373,6 @@ func parseBandwidthAllUnits(text string) (float64, error) {
 	}
 }
 
-// parseBandwidth parses "500 GB" or "1 TB" into bytes.
 func parseBandwidth(text string) (float64, error) {
 	parts := strings.Fields(strings.TrimSpace(text))
 	if len(parts) != 2 {
