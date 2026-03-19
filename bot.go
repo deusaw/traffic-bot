@@ -188,30 +188,32 @@ func handleSyncInput(env *AppEnv, chatID int64, text string) {
 	start, end := GetCycleDates(cfg.ResetDay)
 	cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
 
-	// The effective total before this sync (what user currently sees)
+	// What user currently sees
 	oldTotal := CalcTotalUsed(cfg, cycleBytes)
 
-	// Save: sync_usage = actual, sync_local_base = current local (for future increment calc)
+	// offset = sync值 - vnStat原始累计, so that (vnStat + offset) * factor = actual when factor=1
+	// More precisely: we want CalcTotalUsed to return `actual`, so offset = actual/factor - vnStat
+	factor := cfg.CalibrationFactor
+	if factor <= 0 {
+		factor = 1.0
+	}
+	newOffset := actual/factor - float64(cycleBytes)
+
 	UpdateConfig(func(c *AppConfig) {
-		c.SyncUsage = actual
-		c.SyncLocalBase = float64(cycleBytes)
+		c.UsageOffset = newOffset
 		c.SetupStep = 0
 	})
 
 	reply := fmt.Sprintf("✅ 已同步！当前周期用量已覆盖为 %s\n覆盖前统计：%s",
 		FormatBytes(actual), FormatBytes(oldTotal))
 
-	// Recommend factor based on incremental comparison (only if previously synced)
-	if cfg.SyncUsage > 0 && float64(cycleBytes) > cfg.SyncLocalBase {
-		panelIncrement := actual - cfg.SyncUsage          // 面板增量
-		localIncrement := float64(cycleBytes) - cfg.SyncLocalBase // vnStat 增量
-		if localIncrement > 0 && panelIncrement > 0 {
-			suggested := panelIncrement / localIncrement
-			reply += fmt.Sprintf("\n\n面板增量：%s\n本地增量：%s\n推荐校准倍率：%.4f\n回复 *是* 应用此倍率，或发送其他内容跳过",
-				FormatBytes(panelIncrement), FormatBytes(localIncrement), suggested)
-			pendingFactor = suggested
-			UpdateConfig(func(c *AppConfig) { c.SetupStep = 6 })
-		}
+	// Recommend factor: actual / (vnStat raw total), only if vnStat has meaningful data
+	rawVnstat := float64(cycleBytes)
+	if rawVnstat > 0 {
+		suggested := actual / rawVnstat
+		reply += fmt.Sprintf("\n\n推荐校准倍率：%.4f\n回复 *是* 应用此倍率，或发送其他内容跳过", suggested)
+		pendingFactor = suggested
+		UpdateConfig(func(c *AppConfig) { c.SetupStep = 6 })
 	}
 
 	SendMessage(chatID, reply)
@@ -241,19 +243,12 @@ func handleCalibrate(env *AppEnv, chatID int64, text string) {
 	}
 
 	// Interactive mode
-	info := fmt.Sprintf("📐 *流量校准*\n\n当前倍率：%.4f\n本地统计：%s",
-		cfg.CalibrationFactor, FormatBytes(float64(cycleBytes)))
+	totalUsed := CalcTotalUsed(cfg, cycleBytes)
+	info := fmt.Sprintf("📐 *流量校准*\n\n当前倍率：%.4f\n当前已用：%s\nvnStat 原始：%s",
+		cfg.CalibrationFactor, FormatBytes(totalUsed), FormatBytes(float64(cycleBytes)))
 
-	if cfg.SyncUsage > 0 && cycleBytes > 0 {
-		suggested := cfg.SyncUsage / float64(cycleBytes)
-		info += fmt.Sprintf("\n上次同步用量：%s\n建议倍率：%.4f\n\n回复 *是* 应用建议倍率，或输入自定义倍率（如 `1.25`）\n发送 /cancel 取消",
-			FormatBytes(cfg.SyncUsage), suggested)
-		pendingFactor = suggested
-		UpdateConfig(func(c *AppConfig) { c.SetupStep = 6 })
-	} else {
-		info += "\n\n请输入校准倍率（如 `1.25` 表示本地统计偏低需乘以1.25）\n发送 /cancel 取消"
-		UpdateConfig(func(c *AppConfig) { c.SetupStep = 5 })
-	}
+	info += "\n\n请输入校准倍率（如 `1.25` 表示本地统计偏低需乘以1.25）\n发送 /cancel 取消"
+	UpdateConfig(func(c *AppConfig) { c.SetupStep = 5 })
 	SendMessage(chatID, info)
 }
 

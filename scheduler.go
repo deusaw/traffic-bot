@@ -84,10 +84,9 @@ func resetAlertIfNewCycle(cfg *AppConfig) {
 	if time.Now().Day() == start.Day() && time.Now().Month() == start.Month() {
 		UpdateConfig(func(c *AppConfig) {
 			c.LastAlertPercent = 0
-			c.SyncUsage = 0
-			c.SyncLocalBase = 0
+			c.UsageOffset = 0
 		})
-		log.Println("新计费周期，告警百分比和同步数据已重置")
+		log.Println("新计费周期，告警百分比和同步偏移已重置")
 	}
 }
 
