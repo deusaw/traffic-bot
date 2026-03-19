@@ -288,7 +288,9 @@ func handleReport(env *AppEnv, chatID int64) {
 	sendDailyReport(env, cfg)
 }
 
-// ==================== /status & /daily ====================func handleStatus(env *AppEnv, chatID int64) {
+// ==================== /status & /daily ====================
+
+func handleStatus(env *AppEnv, chatID int64) {
 	cfg, _ := GetConfig()
 	SyncVnStatToDB(env.InterfaceName)
 
