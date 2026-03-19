@@ -188,8 +188,8 @@ func handleSyncInput(env *AppEnv, chatID int64, text string) {
 	start, end := GetCycleDates(cfg.ResetDay)
 	cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
 
-	// The old local total (before sync) with current factor applied
-	oldLocal := float64(cycleBytes) * cfg.CalibrationFactor
+	// The effective total before this sync (what user currently sees)
+	oldTotal := CalcTotalUsed(cfg, cycleBytes)
 
 	// Save: sync_usage = actual, sync_local_base = current local (for future increment calc)
 	UpdateConfig(func(c *AppConfig) {
@@ -198,8 +198,8 @@ func handleSyncInput(env *AppEnv, chatID int64, text string) {
 		c.SetupStep = 0
 	})
 
-	reply := fmt.Sprintf("✅ 已同步！当前周期用量已覆盖为 %s\n覆盖前本地统计：%s",
-		FormatBytes(actual), FormatBytes(oldLocal))
+	reply := fmt.Sprintf("✅ 已同步！当前周期用量已覆盖为 %s\n覆盖前统计：%s",
+		FormatBytes(actual), FormatBytes(oldTotal))
 
 	// Recommend factor if local data exists
 	if cycleBytes > 0 {
