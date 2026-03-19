@@ -194,7 +194,18 @@ func handleSyncInput(env *AppEnv, chatID int64, text string) {
 		c.SetupStep = 0
 	})
 
-	SendMessage(chatID, fmt.Sprintf("✅ 已同步！当前周期用量已设为 %s\n后续 vnStat 新增流量将在此基础上累加。", FormatBytes(actual)))
+	reply := fmt.Sprintf("✅ 已同步！当前周期用量已设为 %s\n后续 vnStat 新增流量将在此基础上累加。", FormatBytes(actual))
+
+	// If local data exists, recommend a calibration factor
+	if cycleBytes > 0 {
+		suggested := actual / float64(cycleBytes)
+		reply += fmt.Sprintf("\n\n本地统计：%s\n推荐校准倍率：%.4f\n\n回复 *是* 应用此倍率，或发送其他内容跳过",
+			FormatBytes(float64(cycleBytes)), suggested)
+		pendingFactor = suggested
+		UpdateConfig(func(c *AppConfig) { c.SetupStep = 6 })
+	}
+
+	SendMessage(chatID, reply)
 }
 
 // ==================== /calibrate ====================
