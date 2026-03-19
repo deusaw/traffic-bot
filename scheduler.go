@@ -53,11 +53,11 @@ func sendDailyReport(env *AppEnv, cfg *AppConfig) {
 		percent = totalUsed / cfg.TotalBandwidth * 100
 	}
 
-	report := fmt.Sprintf(`📊 *每日流量日报*
+	report := fmt.Sprintf(`📊 *Daily Traffic Report*
 
-昨日消耗：%s
-当前周期累计：%s / %s (%.1f%%)
-距离下次重置：%d 天`,
+Yesterday: %s
+Cycle total: %s / %s (%.1f%%)
+Days until reset: %d`,
 		FormatBytes(float64(yesterdayBytes)*cfg.CalibrationFactor),
 		FormatBytes(totalUsed),
 		FormatBytes(cfg.TotalBandwidth),
@@ -122,7 +122,7 @@ func alertCheckLoop(env *AppEnv) {
 		if currentThreshold > cfg.LastAlertPercent && currentThreshold >= 10 {
 			// Send alerts for each missed threshold
 			for t := cfg.LastAlertPercent + 10; t <= currentThreshold; t += 10 {
-				alert := fmt.Sprintf("⚠️ 流量告警：当前账单周期流量已消耗 %d%%！\n已用：%s / 总计：%s",
+				alert := fmt.Sprintf("⚠️ Traffic Alert: %d%% of billing cycle quota used!\nUsed: %s / Total: %s",
 					t,
 					FormatBytes(totalUsed),
 					FormatBytes(cfg.TotalBandwidth))

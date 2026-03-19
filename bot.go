@@ -54,7 +54,7 @@ var pendingFactor float64
 func handleMessage(env *AppEnv, msg *tgbotapi.Message) {
 	cfg, err := GetConfig()
 	if err != nil {
-		SendMessage(msg.Chat.ID, "❌ 读取配置失败，请检查数据库。")
+		SendMessage(msg.Chat.ID, "❌ Failed to read config. Please check the database.")
 		return
 	}
 
@@ -64,16 +64,16 @@ func handleMessage(env *AppEnv, msg *tgbotapi.Message) {
 	if cfg.SetupStep > 0 {
 		if text == "/start" {
 			UpdateConfig(func(c *AppConfig) { c.SetupStep = 1 })
-			SendMessage(msg.Chat.ID, "欢迎使用！请先设置您的套餐每月总流量配额 (支持 GB 或 TB)。\n格式示例：500 GB 或 1 TB")
+			SendMessage(msg.Chat.ID, "Welcome! Please set your monthly bandwidth quota (GB or TB).\nExample: 500 GB or 1 TB")
 			return
 		}
 		if text == "/cancel" && cfg.SetupStep >= 4 {
 			UpdateConfig(func(c *AppConfig) { c.SetupStep = 0 })
-			SendMessage(msg.Chat.ID, "已取消操作。")
+			SendMessage(msg.Chat.ID, "Operation cancelled.")
 			return
 		}
 		if strings.HasPrefix(text, "/") && cfg.SetupStep <= 3 {
-			SendMessage(msg.Chat.ID, "⏳ 请先完成初始化设置，再使用其他指令。")
+			SendMessage(msg.Chat.ID, "⏳ Please complete the initial setup first.")
 			return
 		}
 		switch cfg.SetupStep {
@@ -108,7 +108,7 @@ func handleMessage(env *AppEnv, msg *tgbotapi.Message) {
 	case text == "/report":
 		handleReport(env, msg.Chat.ID)
 	default:
-		SendMessage(msg.Chat.ID, "未知指令，请使用 /help 查看可用命令。")
+		SendMessage(msg.Chat.ID, "Unknown command. Use /help to see available commands.")
 	}
 }
 
@@ -117,59 +117,59 @@ func handleWizard(chatID int64, cfg *AppConfig, text string) {
 	case 1:
 		bw, err := parseBandwidth(text)
 		if err != nil {
-			SendMessage(chatID, "❌ 格式错误，请输入如：500 GB 或 1 TB")
+			SendMessage(chatID, "❌ Invalid format. Example: 500 GB or 1 TB")
 			return
 		}
 		UpdateConfig(func(c *AppConfig) { c.TotalBandwidth = bw; c.SetupStep = 2 })
-		SendMessage(chatID, "✅ 总流量已保存。\n请设置每月的流量重置日期 (1-31)。\n格式示例：15")
+		SendMessage(chatID, "✅ Bandwidth saved.\nPlease set the monthly reset day (1-31).\nExample: 15")
 	case 2:
 		day, err := strconv.Atoi(text)
 		if err != nil || day < 1 || day > 31 {
-			SendMessage(chatID, "❌ 请输入 1-31 之间的数字。")
+			SendMessage(chatID, "❌ Please enter a number between 1 and 31.")
 			return
 		}
 		UpdateConfig(func(c *AppConfig) { c.ResetDay = day; c.SetupStep = 3 })
-		SendMessage(chatID, "✅ 重置日已保存。\n请设置每天接收流量日报的时间 (24小时制 HH:MM)。\n格式示例：08:30")
+		SendMessage(chatID, "✅ Reset day saved.\nPlease set the daily report time (24h format HH:MM).\nExample: 08:30")
 	case 3:
 		matched, _ := regexp.MatchString(`^\d{2}:\d{2}$`, text)
 		if !matched {
-			SendMessage(chatID, "❌ 格式错误，请输入如：08:30")
+			SendMessage(chatID, "❌ Invalid format. Example: 08:30")
 			return
 		}
 		parts := strings.Split(text, ":")
 		h, _ := strconv.Atoi(parts[0])
 		m, _ := strconv.Atoi(parts[1])
 		if h < 0 || h > 23 || m < 0 || m > 59 {
-			SendMessage(chatID, "❌ 时间无效，小时 0-23，分钟 0-59。")
+			SendMessage(chatID, "❌ Invalid time. Hours: 0-23, Minutes: 0-59.")
 			return
 		}
 		UpdateConfig(func(c *AppConfig) { c.DailyPushTime = text; c.SetupStep = 0 })
-		SendMessage(chatID, "🎉 配置完成！系统已开始监控您的 VPS 流量。您随时可以使用 /status 查看当前状态，或使用 /help 查看更多指令。")
+		SendMessage(chatID, "🎉 Setup complete! Traffic monitoring is now active. Use /status to check current usage or /help for all commands.")
 	}
 }
 
 func handleHelp(chatID int64) {
-	help := `📋 *Traffic Bot 指令列表*
+	help := `📋 *Traffic Bot Commands*
 
-/status - 查看当前计费周期流量状态
-/daily - 查看当前周期每日流量明细
-/sync - 手动同步面板实际用量
-/calibrate - 设置流量校准倍率
-/config - 查看当前配置
-/report - 立即发送一次日报
-/settings - 重新配置（总流量/重置日/推送时间）
-/help - 显示此帮助信息`
+/status - View current billing cycle traffic status
+/daily - View daily traffic breakdown
+/sync - Manually sync panel usage
+/calibrate - Set calibration factor
+/config - View current settings
+/report - Send an immediate daily report
+/settings - Reconfigure (bandwidth/reset day/push time)
+/help - Show this help message`
 	SendMessage(chatID, help)
 }
 
 func handleSettings(chatID int64) {
 	UpdateConfig(func(c *AppConfig) { c.SetupStep = 1 })
-	SendMessage(chatID, "请设置您的套餐每月总流量配额 (支持 GB 或 TB)。\n格式示例：500 GB 或 1 TB")
+	SendMessage(chatID, "Please set your monthly bandwidth quota (GB or TB).\nExample: 500 GB or 1 TB")
 }
 
 func handleConfig(chatID int64) {
 	cfg, _ := GetConfig()
-	reply := fmt.Sprintf("⚙️ *当前配置*\n\n总流量配额：%s\n重置日：每月 %d 日\n推送时间：%s\n校准倍率：%.4f",
+	reply := fmt.Sprintf("⚙️ *Current Settings*\n\nBandwidth Quota: %s\nReset Day: %d of each month\nPush Time: %s\nCalibration Factor: %.4f",
 		FormatBytes(cfg.TotalBandwidth), cfg.ResetDay, cfg.DailyPushTime, cfg.CalibrationFactor)
 	SendMessage(chatID, reply)
 }
@@ -183,13 +183,13 @@ func handleSync(env *AppEnv, chatID int64, text string) {
 		return
 	}
 	UpdateConfig(func(c *AppConfig) { c.SetupStep = 4 })
-	SendMessage(chatID, "🔄 *手动同步*\n\n请输入 VPS 面板上显示的当前周期已用总流量（支持 MB / GB / TB）。\n格式示例：`6.81 GB`\n\n发送 /cancel 取消")
+	SendMessage(chatID, "🔄 *Manual Sync*\n\nEnter the total usage shown on your VPS panel (MB / GB / TB).\nExample: `6.81 GB`\n\nSend /cancel to abort")
 }
 
 func handleSyncInput(env *AppEnv, chatID int64, text string) {
 	actual, err := parseBandwidthAllUnits(text)
 	if err != nil {
-		SendMessage(chatID, "❌ 格式错误，请输入如：`6.81 GB` 或 `1.5 TB`")
+		SendMessage(chatID, "❌ Invalid format. Example: `6.81 GB` or `1.5 TB`")
 		return
 	}
 
@@ -213,7 +213,7 @@ func handleSyncInput(env *AppEnv, chatID int64, text string) {
 		c.SetupStep = 0
 	})
 
-	reply := fmt.Sprintf("✅ 已同步！当前周期用量已覆盖为 %s\n覆盖前统计：%s",
+	reply := fmt.Sprintf("✅ Synced! Current cycle usage set to %s\nPrevious value: %s",
 		FormatBytes(actual), FormatBytes(oldTotal))
 
 	// Recommend factor only when meaningful:
@@ -227,7 +227,7 @@ func handleSyncInput(env *AppEnv, chatID int64, text string) {
 			diff = -diff
 		}
 		if diff > 0.01 {
-			reply += fmt.Sprintf("\n\n推荐校准倍率：%.4f\n回复 *是* 应用此倍率，或发送其他内容跳过", suggested)
+			reply += fmt.Sprintf("\n\nSuggested calibration factor: %.4f\nReply *yes* to apply, or anything else to skip", suggested)
 			pendingFactor = suggested
 			UpdateConfig(func(c *AppConfig) { c.SetupStep = 6 })
 		}
@@ -251,20 +251,20 @@ func handleCalibrate(env *AppEnv, chatID int64, text string) {
 	if len(parts) == 2 {
 		factor, err := strconv.ParseFloat(parts[1], 64)
 		if err != nil || factor <= 0 {
-			SendMessage(chatID, "❌ 倍率必须是大于 0 的数字，如：1.25")
+			SendMessage(chatID, "❌ Factor must be a positive number, e.g. 1.25")
 			return
 		}
 		UpdateConfig(func(c *AppConfig) { c.CalibrationFactor = factor })
-		SendMessage(chatID, fmt.Sprintf("✅ 校准倍率已设为 %.4f", factor))
+		SendMessage(chatID, fmt.Sprintf("✅ Calibration factor set to %.4f", factor))
 		return
 	}
 
 	// Interactive mode
 	totalUsed := CalcTotalUsed(cfg, cycleBytes)
-	info := fmt.Sprintf("📐 *流量校准*\n\n当前倍率：%.4f\n当前已用：%s\nvnStat 原始：%s",
+	info := fmt.Sprintf("📐 *Calibration*\n\nCurrent factor: %.4f\nCurrent usage: %s\nvnStat raw: %s",
 		cfg.CalibrationFactor, FormatBytes(totalUsed), FormatBytes(float64(cycleBytes)))
 
-	info += "\n\n请输入校准倍率（如 `1.25` 表示本地统计偏低需乘以1.25）\n发送 /cancel 取消"
+	info += "\n\nEnter calibration factor (e.g. `1.25` means local stats are low, multiply by 1.25)\nSend /cancel to abort"
 	UpdateConfig(func(c *AppConfig) { c.SetupStep = 5 })
 	SendMessage(chatID, info)
 }
@@ -272,14 +272,14 @@ func handleCalibrate(env *AppEnv, chatID int64, text string) {
 func handleCalibrateInput(env *AppEnv, chatID int64, text string) {
 	factor, err := strconv.ParseFloat(strings.TrimSpace(text), 64)
 	if err != nil || factor <= 0 {
-		SendMessage(chatID, "❌ 请输入大于 0 的数字，如：1.25")
+		SendMessage(chatID, "❌ Please enter a positive number, e.g. 1.25")
 		return
 	}
 	UpdateConfig(func(c *AppConfig) {
 		c.CalibrationFactor = factor
 		c.SetupStep = 0
 	})
-	SendMessage(chatID, fmt.Sprintf("✅ 校准倍率已设为 %.4f", factor))
+	SendMessage(chatID, fmt.Sprintf("✅ Calibration factor set to %.4f", factor))
 }
 
 func handleCalibrateConfirm(chatID int64, text string) {
@@ -289,7 +289,7 @@ func handleCalibrateConfirm(chatID int64, text string) {
 			c.CalibrationFactor = pendingFactor
 			c.SetupStep = 0
 		})
-		SendMessage(chatID, fmt.Sprintf("✅ 校准倍率已设为 %.4f", pendingFactor))
+		SendMessage(chatID, fmt.Sprintf("✅ Calibration factor set to %.4f", pendingFactor))
 		return
 	}
 	// Try parsing as custom factor
@@ -299,11 +299,11 @@ func handleCalibrateConfirm(chatID int64, text string) {
 			c.CalibrationFactor = factor
 			c.SetupStep = 0
 		})
-		SendMessage(chatID, fmt.Sprintf("✅ 校准倍率已设为 %.4f", factor))
+		SendMessage(chatID, fmt.Sprintf("✅ Calibration factor set to %.4f", factor))
 		return
 	}
 	UpdateConfig(func(c *AppConfig) { c.SetupStep = 0 })
-	SendMessage(chatID, "已取消，倍率未变更。")
+	SendMessage(chatID, "Cancelled. Factor unchanged.")
 }
 
 // ==================== /report ====================
@@ -332,13 +332,13 @@ func handleStatus(env *AppEnv, chatID int64) {
 	daysLeft := DaysUntilReset(cfg.ResetDay)
 	bar := ProgressBar(percent, 20)
 
-	reply := fmt.Sprintf("📊 *流量状态*\n\n%s %.1f%%\n\n已用：%s / %s\n计费周期：%s ~ %s\n距离重置还有：%d 天",
+	reply := fmt.Sprintf("📊 *Traffic Status*\n\n%s %.1f%%\n\nUsed: %s / %s\nBilling Cycle: %s ~ %s\nDays until reset: %d",
 		bar, percent,
 		FormatBytes(totalUsed), FormatBytes(cfg.TotalBandwidth),
 		startStr, endStr, daysLeft)
 
 	if cfg.CalibrationFactor != 1.0 {
-		reply += fmt.Sprintf("\n校准倍率：%.4f", cfg.CalibrationFactor)
+		reply += fmt.Sprintf("\nCalibration Factor: %.4f", cfg.CalibrationFactor)
 	}
 	SendMessage(chatID, reply)
 }
@@ -357,7 +357,7 @@ func handleDaily(env *AppEnv, chatID int64) {
 
 	logs, err := GetDailyLogs(startStr, endStr)
 	if err != nil || len(logs) == 0 {
-		SendMessage(chatID, "📭 当前周期暂无流量数据。")
+		SendMessage(chatID, "📭 No traffic data for the current cycle.")
 		return
 	}
 
@@ -366,19 +366,19 @@ func handleDaily(env *AppEnv, chatID int64) {
 		factor = 1.0
 	}
 
-	reply := "📅 *当前周期每日流量*\n\n"
+	reply := "📅 *Daily Traffic (Current Cycle)*\n\n"
 	var totalAll int64
 	for _, l := range logs {
 		dayTotal := l.RxBytes + l.TxBytes
 		totalAll += dayTotal
 		adjusted := float64(dayTotal) * factor
-		reply += fmt.Sprintf("`%s` | ↓%s ↑%s | 合计 %s\n",
+		reply += fmt.Sprintf("`%s` | ↓%s ↑%s | Total %s\n",
 			l.RecordDate,
 			FormatBytes(float64(l.RxBytes)*factor),
 			FormatBytes(float64(l.TxBytes)*factor),
 			FormatBytes(adjusted))
 	}
-	reply += fmt.Sprintf("\n合计：%s", FormatBytes(float64(totalAll)*factor))
+	reply += fmt.Sprintf("\nTotal: %s", FormatBytes(float64(totalAll)*factor))
 	SendMessage(chatID, reply)
 }
 
