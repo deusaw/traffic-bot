@@ -99,6 +99,8 @@ func handleMessage(env *AppEnv, msg *tgbotapi.Message) {
 		handleDaily(env, msg.Chat.ID)
 	case text == "/settings":
 		handleSettings(msg.Chat.ID)
+	case text == "/config":
+		handleConfig(msg.Chat.ID)
 	case strings.HasPrefix(text, "/sync"):
 		handleSync(env, msg.Chat.ID, text)
 	case strings.HasPrefix(text, "/calibrate"):
@@ -153,6 +155,7 @@ func handleHelp(chatID int64) {
 /daily - 查看当前周期每日流量明细
 /sync - 手动同步面板实际用量
 /calibrate - 设置流量校准倍率
+/config - 查看当前配置
 /report - 立即发送一次日报
 /settings - 重新配置（总流量/重置日/推送时间）
 /help - 显示此帮助信息`
@@ -162,6 +165,13 @@ func handleHelp(chatID int64) {
 func handleSettings(chatID int64) {
 	UpdateConfig(func(c *AppConfig) { c.SetupStep = 1 })
 	SendMessage(chatID, "请设置您的套餐每月总流量配额 (支持 GB 或 TB)。\n格式示例：500 GB 或 1 TB")
+}
+
+func handleConfig(chatID int64) {
+	cfg, _ := GetConfig()
+	reply := fmt.Sprintf("⚙️ *当前配置*\n\n总流量配额：%s\n重置日：每月 %d 日\n推送时间：%s\n校准倍率：%.4f",
+		FormatBytes(cfg.TotalBandwidth), cfg.ResetDay, cfg.DailyPushTime, cfg.CalibrationFactor)
+	SendMessage(chatID, reply)
 }
 
 // ==================== /sync ====================
