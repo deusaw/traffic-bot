@@ -16,6 +16,7 @@
 | 🔄 Manual Sync | Sync actual usage from your VPS panel, overriding local statistics |
 | 📐 Calibration Factor | Set a multiplier to correct systematic drift between vnStat and your panel |
 | 📅 Custom Billing Cycle | Supports any reset day (e.g. the 15th), not limited to calendar months |
+| 🕐 Dual Timezone | Separate timezones for push notifications (your local time) and billing cycle (provider's reset time) — system clock untouched |
 | 🧹 Auto Cleanup | Only retains current and previous cycle data — database stays lean |
 | 🔐 Auth Protection | Responds only to your authorized Chat ID |
 
@@ -60,7 +61,7 @@ export CHAT_ID="your_chat_id"
 bash install.sh
 ```
 
-Once deployed, send `/start` to your Bot on Telegram and follow the 3-step setup wizard.
+Once deployed, send `/start` to your Bot on Telegram and follow the 5-step setup wizard.
 
 ### Updating
 
@@ -80,19 +81,19 @@ Pulls latest code → Recompiles → Restarts service. Fully automatic.
 
 | Command | Description |
 |---------|-------------|
-| `/start` | First-time setup wizard (total bandwidth → reset day → push time) |
+| `/start` | First-time setup wizard (bandwidth → reset day → push time → push timezone → billing timezone) |
 | `/help` | Show all available commands |
 | `/status` | View current billing cycle status with progress bar and days remaining |
 | `/daily` | View daily upload/download breakdown for the current cycle |
-| `/config` | View current settings (bandwidth quota, reset day, push time, calibration factor) |
+| `/config` | View current settings (bandwidth, reset day, push time, timezones, calibration factor) |
 | `/report` | Trigger an immediate daily report (don't wait for scheduled time) |
-| `/settings` | Re-enter setup wizard to change bandwidth, reset day, or push time |
+| `/settings` | Re-enter setup wizard to change bandwidth, reset day, push time, or timezones |
 
 ### Advanced Commands
 
 | Command | Description |
 |---------|-------------|
-| `/sync` | Manually sync panel usage. Enter the actual usage shown on your VPS panel (e.g. `6.81 GB`). Bot overwrites local stats and may suggest a calibration factor based on the difference. Reply "是" (yes) to apply |
+| `/sync` | Manually sync panel usage. Enter the actual usage shown on your VPS panel (e.g. `6.81 GB`). Bot overwrites local stats and may suggest a calibration factor based on the difference. Reply "yes" to apply |
 | `/sync 6.81 GB` | Same as above, inline shorthand |
 | `/calibrate` | Interactive calibration factor setup, showing current factor and raw vnStat data |
 | `/calibrate 1.25` | Directly set calibration factor to 1.25 |
@@ -103,7 +104,24 @@ Pulls latest code → Recompiles → Restarts service. Fully automatic.
 > vnStat and your VPS panel may report different numbers — this is common. For example, your panel shows 100 GB used, but vnStat only reports 80 GB.
 >
 > - Use `/sync 100 GB` to tell the Bot the real value. It will immediately show 100 GB and suggest a factor of 1.25 (= 100 ÷ 80)
-> - Reply "是" to apply the factor. From then on, vnStat data is automatically multiplied by 1.25 — no more manual syncing needed
+> - Reply "yes" to apply the factor. From then on, vnStat data is automatically multiplied by 1.25 — no more manual syncing needed
+
+---
+
+## 🕐 Timezone Configuration
+
+The bot uses two separate timezones (neither changes your system clock):
+
+| Timezone | Purpose | Example |
+|----------|---------|---------|
+| Push Timezone | When you receive daily reports and alerts (your local time) | `Asia/Shanghai` |
+| Billing Timezone | When the billing cycle resets (your VPS provider's time) | `America/New_York` |
+
+For example, if you're in China using a BandwagonHost DC9 server (US East Coast):
+- Push Timezone: `Asia/Shanghai` — so `10:00` means Beijing time 10 AM
+- Billing Timezone: `America/New_York` — traffic resets at midnight Eastern Time
+
+Common timezone values: `UTC`, `Asia/Shanghai`, `Asia/Tokyo`, `America/New_York`, `America/Los_Angeles`, `Europe/London`
 
 ---
 
