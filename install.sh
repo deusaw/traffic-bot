@@ -26,11 +26,25 @@ detect_distro() {
   echo "检测到系统: $DISTRO"
 }
 
+# ---- 安装基础工具 (curl/wget) ----
+install_base_tools() {
+  echo "[1/7] 安装基础工具..."
+  case "$DISTRO" in
+    centos|rhel|rocky|alma|fedora)
+      yum install -y curl wget 2>/dev/null || true
+      ;;
+    ubuntu|debian|linuxmint|pop)
+      apt update -y
+      apt install -y curl wget ca-certificates 2>/dev/null || true
+      ;;
+  esac
+}
+
 # ---- 安装 vnStat ----
 install_vnstat() {
-  echo "[1/6] 安装 vnStat..."
+  echo "[2/7] 安装 vnStat..."
   if command -v vnstat &> /dev/null; then
-    echo "✅ vnStat 已存在，跳过"
+    echo "✅ vnStat 已存在: $(vnstat --version 2>&1 | head -1)"
     return
   fi
 
@@ -40,7 +54,6 @@ install_vnstat() {
       yum install -y vnstat
       ;;
     ubuntu|debian|linuxmint|pop)
-      apt update -y
       apt install -y vnstat
       ;;
     *)
@@ -48,15 +61,39 @@ install_vnstat() {
       exit 1
       ;;
   esac
+}
 
-  systemctl enable vnstat 2>/dev/null || systemctl enable vnstatd 2>/dev/null || true
-  systemctl start vnstat 2>/dev/null || systemctl start vnstatd 2>/dev/null || true
-  echo "✅ vnStat 已安装并启动"
+# ---- 启动 vnStat 并初始化 ----
+setup_vnstat() {
+  echo "[3/7] 配置 vnStat..."
+
+  # Detect main interface
+  IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+  if [ -z "$IFACE" ]; then
+    IFACE="eth0"
+  fi
+  echo "检测到主网卡: $IFACE"
+
+  # Get vnStat major version
+  VNSTAT_VER=$(vnstat --version 2>&1 | grep -oP '\d+' | head -1)
+
+  if [ "$VNSTAT_VER" = "1" ]; then
+    # vnStat 1.x: need manual DB init
+    vnstat -u -i "$IFACE" 2>/dev/null || true
+    # Service name varies: vnstat or vnstatd
+    systemctl enable vnstat 2>/dev/null || systemctl enable vnstatd 2>/dev/null || true
+    systemctl start vnstat 2>/dev/null || systemctl start vnstatd 2>/dev/null || true
+  else
+    # vnStat 2.x: auto-detects interfaces, just start the service
+    systemctl enable vnstatd 2>/dev/null || systemctl enable vnstat 2>/dev/null || true
+    systemctl start vnstatd 2>/dev/null || systemctl start vnstat 2>/dev/null || true
+  fi
+  echo "✅ vnStat 已配置并启动"
 }
 
 # ---- 安装编译依赖 ----
 install_build_deps() {
-  echo "[2/6] 安装编译依赖..."
+  echo "[4/7] 安装编译依赖..."
   case "$DISTRO" in
     centos|rhel|rocky|alma|fedora)
       yum install -y gcc git sqlite 2>/dev/null || true
@@ -69,7 +106,7 @@ install_build_deps() {
 
 # ---- 安装 Go ----
 install_go() {
-  echo "[3/6] 检查 Go 环境..."
+  echo "[5/7] 检查 Go 环境..."
   if command -v go &> /dev/null; then
     echo "✅ Go 已存在: $(go version)"
     return
@@ -97,20 +134,23 @@ install_go() {
 
 # ---- 拉取代码并编译 ----
 build_bot() {
-  echo "[4/6] 拉取代码并编译..."
+  echo "[6/7] 拉取代码并编译..."
   mkdir -p /opt/traffic-bot
 
   if [ -d /opt/traffic-bot/.git ]; then
     cd /opt/traffic-bot
     git pull
   elif [ -f ./go.mod ] && grep -q "traffic-bot" ./go.mod 2>/dev/null; then
-    # Running from source directory
-    cp -r ./* /opt/traffic-bot/
+    cp -r ./* /opt/traffic-bot/ 2>/dev/null || true
+    cp -r ./.git /opt/traffic-bot/ 2>/dev/null || true
     cd /opt/traffic-bot
   else
+    echo "请输入 GitHub 仓库地址（留空使用默认）："
+    read -p "[https://github.com/deusaw/traffic-bot.git]: " REPO_URL
+    REPO_URL=${REPO_URL:-https://github.com/deusaw/traffic-bot.git}
     cd /opt/traffic-bot
     if [ ! -f go.mod ]; then
-      git clone https://github.com/deusaw/traffic-bot.git .
+      git clone "$REPO_URL" .
     fi
   fi
 
@@ -122,21 +162,9 @@ build_bot() {
   echo "✅ 编译完成"
 }
 
-# ---- 检测网卡 ----
-detect_interface() {
-  IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
-  if [ -z "$IFACE" ]; then
-    IFACE="eth0"
-  fi
-  echo "检测到主网卡: $IFACE"
-
-  # 初始化 vnStat 数据库
-  vnstat -u -i "$IFACE" 2>/dev/null || true
-}
-
 # ---- 配置 Systemd 服务 ----
 setup_service() {
-  echo "[5/6] 配置 Systemd 服务..."
+  echo "[7/7] 配置 Systemd 服务..."
 
   if [ -z "$BOT_TOKEN" ]; then
     read -p "请输入 Telegram Bot Token: " BOT_TOKEN
@@ -167,11 +195,6 @@ EOF
 
   systemctl daemon-reload
   systemctl enable traffic-bot
-}
-
-# ---- 启动 ----
-start_bot() {
-  echo "[6/6] 启动服务..."
   systemctl restart traffic-bot
   sleep 2
 
@@ -181,18 +204,20 @@ start_bot() {
   echo "========================================="
   echo "  系统: $DISTRO"
   echo "  网卡: $IFACE"
+  echo "  vnStat: $(vnstat --version 2>&1 | head -1)"
   echo "  服务状态: systemctl status traffic-bot"
   echo "  查看日志: journalctl -u traffic-bot -f"
+  echo "  后续更新: bash /opt/traffic-bot/update.sh"
   echo "  请在 Telegram 中向 Bot 发送 /start 开始配置"
   echo "========================================="
 }
 
 # ---- 主流程 ----
 detect_distro
+install_base_tools
 install_vnstat
+setup_vnstat
 install_build_deps
 install_go
 build_bot
-detect_interface
 setup_service
-start_bot
