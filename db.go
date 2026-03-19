@@ -15,7 +15,8 @@ type AppConfig struct {
 	UsageOffset       float64 // sync差值 = sync值 - vnStat周期累计，新周期清零
 	CalibrationFactor float64 // 倍率，默认 1.0
 	LastAlertPercent  int
-	SetupStep         int // 0=complete, 1-3=wizard, 4=sync input, 5=calibrate input, 6=calibrate confirm
+	SetupStep         int    // 0=complete, 1-3=wizard, 4=sync input, 5=calibrate input, 6=calibrate confirm
+	LastResetCycle    string // 上次重置对应的周期起始日 "YYYY-MM-DD"，防止重复重置
 }
 
 type DailyTrafficLog struct {
@@ -62,6 +63,7 @@ func InitDB(dbPath string) error {
 	migrations := []string{
 		"ALTER TABLE app_config ADD COLUMN usage_offset REAL DEFAULT 0",
 		"ALTER TABLE app_config ADD COLUMN calibration_factor REAL DEFAULT 1.0",
+		"ALTER TABLE app_config ADD COLUMN last_reset_cycle VARCHAR DEFAULT ''",
 	}
 	for _, m := range migrations {
 		db.Exec(m)
@@ -72,10 +74,11 @@ func InitDB(dbPath string) error {
 func GetConfig() (*AppConfig, error) {
 	cfg := &AppConfig{}
 	err := db.QueryRow(`SELECT total_bandwidth, reset_day, daily_push_time,
-		usage_offset, calibration_factor, last_alert_percentage, setup_step FROM app_config WHERE id=1`).
+		usage_offset, calibration_factor, last_alert_percentage, setup_step,
+		COALESCE(last_reset_cycle, '') FROM app_config WHERE id=1`).
 		Scan(&cfg.TotalBandwidth, &cfg.ResetDay, &cfg.DailyPushTime,
 			&cfg.UsageOffset, &cfg.CalibrationFactor,
-			&cfg.LastAlertPercent, &cfg.SetupStep)
+			&cfg.LastAlertPercent, &cfg.SetupStep, &cfg.LastResetCycle)
 	return cfg, err
 }
 
@@ -86,10 +89,11 @@ func UpdateConfig(fn func(cfg *AppConfig)) error {
 	}
 	fn(cfg)
 	_, err = db.Exec(`UPDATE app_config SET total_bandwidth=?, reset_day=?, daily_push_time=?,
-		usage_offset=?, calibration_factor=?, last_alert_percentage=?, setup_step=? WHERE id=1`,
+		usage_offset=?, calibration_factor=?, last_alert_percentage=?, setup_step=?,
+		last_reset_cycle=? WHERE id=1`,
 		cfg.TotalBandwidth, cfg.ResetDay, cfg.DailyPushTime,
 		cfg.UsageOffset, cfg.CalibrationFactor,
-		cfg.LastAlertPercent, cfg.SetupStep)
+		cfg.LastAlertPercent, cfg.SetupStep, cfg.LastResetCycle)
 	return err
 }
 

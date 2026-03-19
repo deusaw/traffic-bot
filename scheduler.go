@@ -77,14 +77,18 @@ func runDataCleanup(cfg *AppConfig) {
 	}
 }
 
-// resetAlertIfNewCycle resets the alert percentage if we've entered a new billing cycle.
+// resetAlertIfNewCycle resets alert and offset when a NEW billing cycle begins.
+// Compares current cycle start date with last recorded reset cycle to ensure one-time reset.
 func resetAlertIfNewCycle(cfg *AppConfig) {
 	start, _ := GetCycleDates(cfg.ResetDay)
-	// If today is the reset day, reset alert
-	if time.Now().Day() == start.Day() && time.Now().Month() == start.Month() {
+	cycleStart := start.Format("2006-01-02")
+
+	// Only reset if this is a different cycle than the last one we reset for
+	if cycleStart != cfg.LastResetCycle {
 		UpdateConfig(func(c *AppConfig) {
 			c.LastAlertPercent = 0
 			c.UsageOffset = 0
+			c.LastResetCycle = cycleStart
 		})
 		log.Println("新计费周期，告警百分比和同步偏移已重置")
 	}
