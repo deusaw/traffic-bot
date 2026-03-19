@@ -103,6 +103,8 @@ func handleMessage(env *AppEnv, msg *tgbotapi.Message) {
 		handleSync(env, msg.Chat.ID, text)
 	case strings.HasPrefix(text, "/calibrate"):
 		handleCalibrate(env, msg.Chat.ID, text)
+	case text == "/report":
+		handleReport(env, msg.Chat.ID)
 	default:
 		SendMessage(msg.Chat.ID, "未知指令，请使用 /help 查看可用命令。")
 	}
@@ -151,6 +153,7 @@ func handleHelp(chatID int64) {
 /daily - 查看当前周期每日流量明细
 /sync - 手动同步面板实际用量
 /calibrate - 设置流量校准倍率
+/report - 立即发送一次日报
 /settings - 重新配置（总流量/重置日/推送时间）
 /help - 显示此帮助信息`
 	SendMessage(chatID, help)
@@ -278,9 +281,14 @@ func handleCalibrateConfirm(chatID int64, text string) {
 	SendMessage(chatID, "已取消，倍率未变更。")
 }
 
-// ==================== /status & /daily ====================
+// ==================== /report ====================
 
-func handleStatus(env *AppEnv, chatID int64) {
+func handleReport(env *AppEnv, chatID int64) {
+	cfg, _ := GetConfig()
+	sendDailyReport(env, cfg)
+}
+
+// ==================== /status & /daily ====================func handleStatus(env *AppEnv, chatID int64) {
 	cfg, _ := GetConfig()
 	SyncVnStatToDB(env.InterfaceName)
 
