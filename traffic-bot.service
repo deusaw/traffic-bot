@@ -1,0 +1,17 @@
+[Unit]
+Description=Traffic Bot - VPS 流量监控 Telegram 助手
+After=network.target vnstat.service
+
+[Service]
+Type=simple
+ExecStart=/opt/traffic-bot/traffic-bot
+Restart=always
+RestartSec=5
+Environment=BOT_TOKEN=YOUR_BOT_TOKEN
+Environment=CHAT_ID=YOUR_CHAT_ID
+Environment=INTERFACE=eth0
+Environment=DB_PATH=/opt/traffic-bot/traffic-bot.db
+WorkingDirectory=/opt/traffic-bot
+
+[Install]
+WantedBy=multi-user.target
