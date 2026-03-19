@@ -152,13 +152,14 @@ func GetYesterdayTraffic() (int64, error) {
 	return total.Int64, nil
 }
 
-// CalcTotalUsed: 已用量 = (vnStat周期累计 + offset) * factor
+// CalcTotalUsed: 已用量 = vnStat周期累计 * factor + offset
+// offset 是 sync 产生的差值，不参与倍率计算
 func CalcTotalUsed(cfg *AppConfig, localCycleBytes int64) float64 {
 	factor := cfg.CalibrationFactor
 	if factor <= 0 {
 		factor = 1.0
 	}
-	total := (float64(localCycleBytes) + cfg.UsageOffset) * factor
+	total := float64(localCycleBytes)*factor + cfg.UsageOffset
 	if total < 0 {
 		total = 0
 	}

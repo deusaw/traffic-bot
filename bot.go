@@ -191,13 +191,12 @@ func handleSyncInput(env *AppEnv, chatID int64, text string) {
 	// What user currently sees
 	oldTotal := CalcTotalUsed(cfg, cycleBytes)
 
-	// offset = sync值 - vnStat原始累计, so that (vnStat + offset) * factor = actual when factor=1
-	// More precisely: we want CalcTotalUsed to return `actual`, so offset = actual/factor - vnStat
+	// offset = sync值 - vnStat*倍率，这样 vnStat*factor + offset = actual
 	factor := cfg.CalibrationFactor
 	if factor <= 0 {
 		factor = 1.0
 	}
-	newOffset := actual/factor - float64(cycleBytes)
+	newOffset := actual - float64(cycleBytes)*factor
 
 	UpdateConfig(func(c *AppConfig) {
 		c.UsageOffset = newOffset
