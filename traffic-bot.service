@@ -1,6 +1,6 @@
 [Unit]
 Description=Traffic Bot - VPS 流量监控 Telegram 助手
-After=network.target vnstat.service
+After=network.target
 
 [Service]
 Type=simple

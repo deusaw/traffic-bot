@@ -16,8 +16,8 @@ echo "[1/5] 安装 vnStat..."
 if ! command -v vnstat &> /dev/null; then
   yum install -y epel-release
   yum install -y vnstat
-  systemctl enable vnstatd
-  systemctl start vnstatd
+  systemctl enable vnstat
+  systemctl start vnstat
   echo "✅ vnStat 已安装并启动"
 else
   echo "✅ vnStat 已存在，跳过安装"
@@ -57,7 +57,7 @@ fi
 cat > /etc/systemd/system/traffic-bot.service << EOF
 [Unit]
 Description=Traffic Bot - VPS 流量监控 Telegram 助手
-After=network.target vnstat.service
+After=network.target
 
 [Service]
 Type=simple
