@@ -23,9 +23,9 @@ func dailyReportLoop(env *AppEnv) {
 			continue
 		}
 
-		// Push time uses system local clock (user's real time)
-		// Billing cycle dates use cfg.Timezone (provider's reset timezone)
-		now := time.Now()
+		// Push time uses user's local timezone
+		// Billing cycle dates use provider's billing timezone
+		now := NowInZone(cfg.PushTimezone)
 		todayStr := now.Format("2006-01-02")
 		currentTime := now.Format("15:04")
 
@@ -44,11 +44,11 @@ func sendDailyReport(env *AppEnv, cfg *AppConfig) {
 		log.Printf("日报同步失败: %v", err)
 	}
 
-	yesterdayBytes, _ := GetYesterdayTraffic(cfg.Timezone)
-	start, end := GetCycleDates(cfg.ResetDay, cfg.Timezone)
+	yesterdayBytes, _ := GetYesterdayTraffic(cfg.BillingTimezone)
+	start, end := GetCycleDates(cfg.ResetDay, cfg.BillingTimezone)
 	cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
 	totalUsed := CalcTotalUsed(cfg, cycleBytes)
-	daysLeft := DaysUntilReset(cfg.ResetDay, cfg.Timezone)
+	daysLeft := DaysUntilReset(cfg.ResetDay, cfg.BillingTimezone)
 
 	percent := 0.0
 	if cfg.TotalBandwidth > 0 {
@@ -71,7 +71,7 @@ Days until reset: %d`,
 }
 
 func runDataCleanup(cfg *AppConfig) {
-	prevStart := GetPrevCycleStart(cfg.ResetDay, cfg.Timezone)
+	prevStart := GetPrevCycleStart(cfg.ResetDay, cfg.BillingTimezone)
 	if err := CleanOldData(prevStart.Format("2006-01-02")); err != nil {
 		log.Printf("数据清理失败: %v", err)
 	} else {
@@ -82,7 +82,7 @@ func runDataCleanup(cfg *AppConfig) {
 // resetAlertIfNewCycle resets alert and offset when a NEW billing cycle begins.
 // Compares current cycle start date with last recorded reset cycle to ensure one-time reset.
 func resetAlertIfNewCycle(cfg *AppConfig) {
-	start, _ := GetCycleDates(cfg.ResetDay, cfg.Timezone)
+	start, _ := GetCycleDates(cfg.ResetDay, cfg.BillingTimezone)
 	cycleStart := start.Format("2006-01-02")
 
 	// Only reset if this is a different cycle than the last one we reset for
@@ -109,7 +109,7 @@ func alertCheckLoop(env *AppEnv) {
 		// Sync data
 		SyncVnStatToDB(env.InterfaceName)
 
-		start, end := GetCycleDates(cfg.ResetDay, cfg.Timezone)
+		start, end := GetCycleDates(cfg.ResetDay, cfg.BillingTimezone)
 		cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
 		totalUsed := CalcTotalUsed(cfg, cycleBytes)
 
