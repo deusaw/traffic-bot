@@ -399,7 +399,14 @@ func handleDaily(env *AppEnv, chatID int64) {
 			FormatBytes(float64(l.TxBytes)*factor),
 			FormatBytes(adjusted))
 	}
-	reply += fmt.Sprintf("\nTotal: %s", FormatBytes(float64(totalAll)*factor))
+
+	// Show raw total (with factor) and the calibrated total (with factor + offset) if they differ
+	rawTotal := float64(totalAll) * factor
+	calibratedTotal := CalcTotalUsed(cfg, totalAll)
+	reply += fmt.Sprintf("\nTotal: %s", FormatBytes(rawTotal))
+	if cfg.UsageOffset != 0 {
+		reply += fmt.Sprintf("\nSynced total: %s", FormatBytes(calibratedTotal))
+	}
 	SendMessage(chatID, reply)
 }
 
