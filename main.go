@@ -2,6 +2,9 @@ package main
 
 import (
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 )
 
 func main() {
@@ -17,6 +20,7 @@ func main() {
 	if err := InitDB(env.DBPath); err != nil {
 		log.Fatalf("数据库初始化失败: %v", err)
 	}
+	defer CloseDB()
 	log.Println("数据库已就绪")
 
 	// 3. Initialize Telegram Bot
@@ -33,7 +37,15 @@ func main() {
 	StartScheduler(env)
 	log.Println("定时任务已启动")
 
-	// 6. Start Telegram polling (blocking)
+	// 6. Handle graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	// 7. Start Telegram polling in background
+	go StartPolling(env)
 	log.Println("开始接收 Telegram 消息...")
-	StartPolling(env)
+
+	// Block until signal
+	sig := <-sigCh
+	log.Printf("收到信号 %v，正在关闭...", sig)
 }

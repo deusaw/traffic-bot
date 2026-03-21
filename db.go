@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"sync"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -27,6 +28,7 @@ type DailyTrafficLog struct {
 }
 
 var db *sql.DB
+var configMu sync.Mutex
 
 func InitDB(dbPath string) error {
 	var err error
@@ -90,6 +92,9 @@ func GetConfig() (*AppConfig, error) {
 }
 
 func UpdateConfig(fn func(cfg *AppConfig)) error {
+	configMu.Lock()
+	defer configMu.Unlock()
+
 	cfg, err := GetConfig()
 	if err != nil {
 		return err
@@ -145,6 +150,12 @@ func GetDailyLogs(startDate, endDate string) ([]DailyTrafficLog, error) {
 func CleanOldData(beforeDate string) error {
 	_, err := db.Exec(`DELETE FROM daily_traffic_log WHERE record_date < ?`, beforeDate)
 	return err
+}
+
+func CloseDB() {
+	if db != nil {
+		db.Close()
+	}
 }
 
 func GetYesterdayTraffic(tz string) (int64, error) {

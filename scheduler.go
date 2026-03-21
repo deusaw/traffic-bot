@@ -35,6 +35,21 @@ func dailyReportLoop(env *AppEnv) {
 			runDataCleanup(cfg)
 			resetAlertIfNewCycle(cfg)
 		}
+
+		// Fallback: if we somehow missed the exact minute (e.g. heavy load),
+		// check if we're within 2 minutes past push time and haven't sent today
+		if lastSentDate != todayStr && cfg.DailyPushTime != "" {
+			pushH, pushM := 0, 0
+			fmt.Sscanf(cfg.DailyPushTime, "%d:%d", &pushH, &pushM)
+			nowH, nowM := now.Hour(), now.Minute()
+			diffMin := (nowH*60 + nowM) - (pushH*60 + pushM)
+			if diffMin > 0 && diffMin <= 2 {
+				lastSentDate = todayStr
+				sendDailyReport(env, cfg)
+				runDataCleanup(cfg)
+				resetAlertIfNewCycle(cfg)
+			}
+		}
 	}
 }
 
