@@ -85,8 +85,14 @@ func resetAlertIfNewCycle(cfg *AppConfig) {
 	start, _ := GetCycleDates(cfg.ResetDay, cfg.BillingTimezone)
 	cycleStart := start.Format("2006-01-02")
 
-	// Only reset if this is a different cycle than the last one we reset for
-	if cycleStart != cfg.LastResetCycle {
+	if cfg.LastResetCycle == "" {
+		// First run or migration — just record current cycle, don't reset anything
+		UpdateConfig(func(c *AppConfig) {
+			c.LastResetCycle = cycleStart
+		})
+		log.Println("首次运行，记录当前计费周期: " + cycleStart)
+	} else if cycleStart != cfg.LastResetCycle {
+		// Actual new cycle transition — reset offset and alert
 		UpdateConfig(func(c *AppConfig) {
 			c.LastAlertPercent = 0
 			c.UsageOffset = 0
