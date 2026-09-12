@@ -14,7 +14,12 @@ git pull
 echo "[2/4] 编译..."
 CGO_ENABLED=1 go build -o traffic-bot .
 
-echo "[3/4] 重启服务..."
+echo "[3/4] 修复 vnStat 数据目录权限并重启服务..."
+if id vnstat &>/dev/null && [ -d /var/lib/vnstat ]; then
+  sed -i -E 's/^[[:space:]]*UpdateInterval[[:space:]]+[0-9]+/UpdateInterval 5/' /etc/vnstat.conf
+  chown -R vnstat:vnstat /var/lib/vnstat
+  systemctl restart vnstat 2>/dev/null || systemctl restart vnstatd 2>/dev/null || true
+fi
 systemctl restart traffic-bot
 
 echo "[4/4] 检查状态..."

@@ -80,15 +80,24 @@ setup_vnstat() {
   if [ "$VNSTAT_VER" = "1" ]; then
     # vnStat 1.x: need manual DB init
     vnstat -u -i "$IFACE" 2>/dev/null || true
+    # The initialization above runs as root, while vnstatd normally runs as
+    # the vnstat user. Ensure the daemon can subsequently update its database.
+    chown -R vnstat:vnstat /var/lib/vnstat
     # Service name varies: vnstat or vnstatd
     systemctl enable vnstat 2>/dev/null || systemctl enable vnstatd 2>/dev/null || true
     systemctl start vnstat 2>/dev/null || systemctl start vnstatd 2>/dev/null || true
   else
     # vnStat 2.x: auto-detects interfaces, just start the service
+    chown -R vnstat:vnstat /var/lib/vnstat
     systemctl enable vnstatd 2>/dev/null || systemctl enable vnstat 2>/dev/null || true
     systemctl start vnstatd 2>/dev/null || systemctl start vnstat 2>/dev/null || true
   fi
-  echo "✅ vnStat 已配置并启动"
+  # Match the bot's five-minute alert cadence and ensure the daemon can keep
+  # writing its database after root performed the initial setup.
+  sed -i -E 's/^[[:space:]]*UpdateInterval[[:space:]]+[0-9]+/UpdateInterval 5/' /etc/vnstat.conf
+  chown -R vnstat:vnstat /var/lib/vnstat
+  systemctl restart vnstat 2>/dev/null || systemctl restart vnstatd 2>/dev/null || true
+  echo "✅ vnStat 已配置并启动（每 5 分钟更新）"
 }
 
 # ---- 安装编译依赖 ----
@@ -167,11 +176,21 @@ setup_service() {
   echo "[7/7] 配置 Systemd 服务..."
 
   if [ -z "$BOT_TOKEN" ]; then
-    read -p "请输入 Telegram Bot Token: " BOT_TOKEN
+    read -s -p "请输入 Telegram Bot Token: " BOT_TOKEN
+    echo
   fi
   if [ -z "$CHAT_ID" ]; then
     read -p "请输入授权的 Chat ID: " CHAT_ID
   fi
+
+  umask 077
+  cat > /etc/traffic-bot.env << EOF
+BOT_TOKEN=${BOT_TOKEN}
+CHAT_ID=${CHAT_ID}
+INTERFACE=${IFACE}
+DB_PATH=/opt/traffic-bot/traffic-bot.db
+EOF
+  chmod 600 /etc/traffic-bot.env
 
   cat > /etc/systemd/system/traffic-bot.service << EOF
 [Unit]
@@ -183,10 +202,7 @@ Type=simple
 ExecStart=/opt/traffic-bot/traffic-bot
 Restart=always
 RestartSec=5
-Environment=BOT_TOKEN=${BOT_TOKEN}
-Environment=CHAT_ID=${CHAT_ID}
-Environment=INTERFACE=${IFACE}
-Environment=DB_PATH=/opt/traffic-bot/traffic-bot.db
+EnvironmentFile=/etc/traffic-bot.env
 WorkingDirectory=/opt/traffic-bot
 
 [Install]

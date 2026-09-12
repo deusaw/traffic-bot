@@ -49,6 +49,12 @@ cd traffic-bot
 bash install.sh
 ```
 
+如果是全新系统、尚未安装 Git，可先执行：
+
+```bash
+yum install -y git || apt update && apt install -y git
+```
+
 脚本会引导你输入 Bot Token 和 Chat ID，其余全部自动处理：
 
 > 安装 curl/gcc/git → 安装 Go 编译器 → 安装并配置 vnStat → 编译项目 → 注册开机自启服务 → 启动
@@ -127,11 +133,11 @@ Bot 使用两个独立时区（均不会修改系统时钟）：
 
 ## ⚙️ 环境变量
 
-通过 Systemd 服务文件传入，部署脚本会自动配置。如需手动修改：
+通过权限为 `600` 的环境文件传入，部署脚本会自动配置。如需手动修改：
 
 ```bash
 # 编辑服务文件
-nano /etc/systemd/system/traffic-bot.service
+nano /etc/traffic-bot.env
 
 # 修改后重新加载并重启
 systemctl daemon-reload

@@ -7,10 +7,7 @@ Type=simple
 ExecStart=/opt/traffic-bot/traffic-bot
 Restart=always
 RestartSec=5
-Environment=BOT_TOKEN=YOUR_BOT_TOKEN
-Environment=CHAT_ID=YOUR_CHAT_ID
-Environment=INTERFACE=eth0
-Environment=DB_PATH=/opt/traffic-bot/traffic-bot.db
+EnvironmentFile=/etc/traffic-bot.env
 WorkingDirectory=/opt/traffic-bot
 
 [Install]

@@ -49,6 +49,12 @@ cd traffic-bot
 bash install.sh
 ```
 
+On a fresh system without Git, install it first:
+
+```bash
+yum install -y git || apt update && apt install -y git
+```
+
 The script will prompt you for Bot Token and Chat ID, then handle everything else:
 
 > Install curl/gcc/git → Install Go compiler → Install & configure vnStat → Compile → Register systemd service → Start
@@ -127,11 +133,11 @@ Common timezone values: `UTC`, `Asia/Shanghai`, `Asia/Tokyo`, `America/New_York`
 
 ## ⚙️ Environment Variables
 
-Passed via the systemd service file. The install script configures these automatically. To modify manually:
+Passed via a mode-600 environment file. The install script configures it automatically. To modify manually:
 
 ```bash
 # Edit the service file
-nano /etc/systemd/system/traffic-bot.service
+nano /etc/traffic-bot.env
 
 # Reload and restart after changes
 systemctl daemon-reload
