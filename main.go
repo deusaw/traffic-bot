@@ -1,6 +1,8 @@
 package main
 
 import (
+	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -8,6 +10,19 @@ import (
 )
 
 func main() {
+	check := flag.Bool("check-traffic", false, "Read live traffic without opening the bot database or Telegram")
+	iface := flag.String("interface", "eth0", "Interface for --check-traffic")
+	flag.Parse()
+	if *check {
+		entries, err := FetchVnStatDays(*iface)
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, e := range entries {
+			fmt.Printf("%s rx=%d tx=%d total=%d bytes\n", e.Date, e.RxBytes, e.TxBytes, e.RxBytes+e.TxBytes)
+		}
+		return
+	}
 	log.Println("Traffic Bot 启动中...")
 
 	// 1. Load environment config

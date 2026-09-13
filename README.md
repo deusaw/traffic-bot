@@ -5,6 +5,18 @@
   <p align="center">🇬🇧 English | <a href="./README_CN.md">🇨🇳 中文</a></p>
 </p>
 
+### Query freshness and daily dates
+
+On vnStat 1.x, `/status`, `/daily`, and `/sync` overlay unsaved kernel interface
+increments on persisted daily records. Repeated queries do not double-count;
+traffic keeps accumulating after `/sync`. vnStat 2.x still uses saved data.
+Counter resets and unfinished day rollover return an explicit refresh error.
+Daily reports select yesterday in the **push timezone**, but daily buckets remain
+in the **VPS timezone**, matching `/daily`. An unfinished bucket is marked
+provisional; missing data is not reported as zero.
+Read-only byte-level diagnostics: `traffic-bot --check-traffic --interface eth0`.
+Updates support Git and archive installations and preserve the database and secrets.
+
 ---
 
 ## ✨ Features

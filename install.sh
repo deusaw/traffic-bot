@@ -79,7 +79,9 @@ setup_vnstat() {
 
   if [ "$VNSTAT_VER" = "1" ]; then
     # vnStat 1.x: need manual DB init
-    vnstat -u -i "$IFACE" 2>/dev/null || true
+    if [ ! -f "/var/lib/vnstat/$IFACE" ]; then
+      vnstat -u -i "$IFACE"
+    fi
     # The initialization above runs as root, while vnstatd normally runs as
     # the vnstat user. Ensure the daemon can subsequently update its database.
     chown -R vnstat:vnstat /var/lib/vnstat
@@ -92,12 +94,14 @@ setup_vnstat() {
     systemctl enable vnstatd 2>/dev/null || systemctl enable vnstat 2>/dev/null || true
     systemctl start vnstatd 2>/dev/null || systemctl start vnstat 2>/dev/null || true
   fi
-  # Match the bot's five-minute alert cadence and ensure the daemon can keep
-  # writing its database after root performed the initial setup.
+  # UpdateInterval is in SECONDS; SaveInterval is in MINUTES.
+  # Include hidden backup files (.eth0), whose ownership also blocks saves.
   sed -i -E 's/^[[:space:]]*UpdateInterval[[:space:]]+[0-9]+/UpdateInterval 5/' /etc/vnstat.conf
+  sed -i -E 's/^[[:space:]]*SaveInterval[[:space:]]+[0-9]+/SaveInterval 5/' /etc/vnstat.conf
   chown -R vnstat:vnstat /var/lib/vnstat
   systemctl restart vnstat 2>/dev/null || systemctl restart vnstatd 2>/dev/null || true
-  echo "✅ vnStat 已配置并启动（每 5 分钟更新）"
+  systemctl is-active --quiet vnstat || systemctl is-active --quiet vnstatd
+  echo "✅ vnStat 已启动（每 5 秒采样、每 5 分钟保存；1.x 查询叠加网卡实时增量）"
 }
 
 # ---- 安装编译依赖 ----
@@ -115,6 +119,7 @@ install_build_deps() {
 
 # ---- 安装 Go ----
 install_go() {
+  export PATH="$PATH:/usr/local/go/bin"
   echo "[5/7] 检查 Go 环境..."
   if command -v go &> /dev/null; then
     echo "✅ Go 已存在: $(go version)"
@@ -131,7 +136,10 @@ install_go() {
   esac
 
   curl -sL "https://go.dev/dl/go1.21.13.linux-${GOARCH}.tar.gz" -o /tmp/go.tar.gz
-  rm -rf /usr/local/go
+  if [ -e /usr/local/go ]; then
+    echo "❌ /usr/local/go 已存在但不可用，请检查；不会删除现有安装"
+    exit 1
+  fi
   tar -C /usr/local -xzf /tmp/go.tar.gz
   rm -f /tmp/go.tar.gz
 

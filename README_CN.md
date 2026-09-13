@@ -5,6 +5,15 @@
   <p align="center"><a href="./README.md">🇬🇧 English</a> | 🇨🇳 中文</p>
 </p>
 
+### 实时查询与日报日期
+
+- vnStat 1.x：每次 `/status`、`/daily`、`/sync` 都读取网卡计数器，将尚未写入 vnStat 的增量叠加到已保存记录；重复查询不会重复累计。`/sync` 只校准基准，之后的新增流量继续累计。
+- vnStat 2.x 暂时仍读取其已保存数据，不保证查询瞬间实时刷新。
+- 日报按**推送时区**选择昨天的日期，与 `/daily` 的同日期记录一致；记录本身仍按 **VPS 时区**划分。如果该 VPS 日期还没结束，会注明暂计。缺失记录显示“无记录”，不冒充 0。
+- 重启、网卡计数器重置或 vnStat 尚未完成跨日归档时，实时查询会明确报错，待 vnStat 保存新基准后恢复。小于 0.01 GB 的变化可能因显示精度看不出来。
+- 只读诊断：`/opt/traffic-bot/traffic-bot --check-traffic --interface eth0`，输出字节数，不连接 Telegram，也不修改 Bot 数据库。
+- `update.sh` 同时支持 Git 和压缩包安装，先测试、编译再替换二进制；保留数据库与凭据，仅重启 Traffic Bot。
+
 ---
 
 ## ✨ 功能特性

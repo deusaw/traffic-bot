@@ -217,7 +217,11 @@ func handleSyncInput(env *AppEnv, chatID int64, text string) {
 		return
 	}
 
-	SyncVnStatToDB(env.InterfaceName)
+	if err := SyncVnStatToDB(env.InterfaceName); err != nil {
+		log.Printf("sync refresh: %v", err)
+		SendMessage(chatID, "⚠️ Cannot refresh traffic; sync cancelled and previous baseline preserved.")
+		return
+	}
 	cfg, _ := GetConfig()
 	start, end := GetCycleDates(cfg.ResetDay, cfg.BillingTimezone)
 	cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
@@ -263,7 +267,11 @@ func handleCalibrate(env *AppEnv, chatID int64, text string) {
 	parts := strings.Fields(text)
 
 	// Show current state first
-	SyncVnStatToDB(env.InterfaceName)
+	if err := SyncVnStatToDB(env.InterfaceName); err != nil {
+		log.Printf("calibrate refresh: %v", err)
+		SendMessage(chatID, "⚠️ Cannot refresh traffic; calibration cancelled.")
+		return
+	}
 	cfg, _ := GetConfig()
 	start, end := GetCycleDates(cfg.ResetDay, cfg.BillingTimezone)
 	cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
@@ -338,7 +346,11 @@ func handleReport(env *AppEnv, chatID int64) {
 
 func handleStatus(env *AppEnv, chatID int64) {
 	cfg, _ := GetConfig()
-	SyncVnStatToDB(env.InterfaceName)
+	if err := SyncVnStatToDB(env.InterfaceName); err != nil {
+		log.Printf("status refresh: %v", err)
+		SendMessage(chatID, "⚠️ Cannot refresh traffic. Check vnStat daemon logs; old totals are not a live reading.")
+		return
+	}
 
 	start, end := GetCycleDates(cfg.ResetDay, cfg.BillingTimezone)
 	startStr := start.Format("2006-01-02")
@@ -366,11 +378,15 @@ func handleStatus(env *AppEnv, chatID int64) {
 
 func handleDaily(env *AppEnv, chatID int64) {
 	cfg, _ := GetConfig()
-	SyncVnStatToDB(env.InterfaceName)
+	if err := SyncVnStatToDB(env.InterfaceName); err != nil {
+		log.Printf("daily refresh: %v", err)
+		SendMessage(chatID, "⚠️ Cannot refresh traffic. Check vnStat daemon logs.")
+		return
+	}
 
 	start, end := GetCycleDates(cfg.ResetDay, cfg.BillingTimezone)
 	startStr := start.Format("2006-01-02")
-	today := NowInZone(cfg.BillingTimezone).Format("2006-01-02")
+	today := time.Now().Format("2006-01-02")
 	endStr := today
 	if end.Format("2006-01-02") < today {
 		endStr = end.Format("2006-01-02")
@@ -387,7 +403,7 @@ func handleDaily(env *AppEnv, chatID int64) {
 		factor = 1.0
 	}
 
-	reply := "📅 *Daily Traffic (Current Cycle)*\n\n"
+	reply := "📅 *Daily Traffic (Current Cycle)*\nDates use the VPS timezone.\n\n"
 	var totalAll int64
 	for _, l := range logs {
 		dayTotal := l.RxBytes + l.TxBytes

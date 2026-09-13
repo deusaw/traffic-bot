@@ -57,9 +57,19 @@ func sendDailyReport(env *AppEnv, cfg *AppConfig) {
 	// Sync latest vnStat data
 	if err := SyncVnStatToDB(env.InterfaceName); err != nil {
 		log.Printf("日报同步失败: %v", err)
+		SendMessage(env.AuthChatID, "⚠️ Traffic refresh failed; daily report is unavailable. Check vnStat service logs.")
+		return
 	}
 
-	yesterdayBytes, _ := GetYesterdayTraffic(cfg.BillingTimezone)
+	// Select yesterday in the user's push timezone, never the billing timezone.
+	// Existing vnStat records still represent VPS-local calendar days.
+	yesterday, bucketNote := dailyReportDate(time.Now(), cfg.PushTimezone)
+	yesterdayText, err := dailyUsageText(yesterday, cfg.CalibrationFactor)
+	if err != nil {
+		log.Printf("日报查询失败: %v", err)
+		SendMessage(env.AuthChatID, "⚠️ Daily report database query failed.")
+		return
+	}
 	start, end := GetCycleDates(cfg.ResetDay, cfg.BillingTimezone)
 	cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
 	totalUsed := CalcTotalUsed(cfg, cycleBytes)
@@ -72,10 +82,13 @@ func sendDailyReport(env *AppEnv, cfg *AppConfig) {
 
 	report := fmt.Sprintf(`📊 *Daily Traffic Report*
 
-Yesterday: %s
+Yesterday's date (%s): %s
+%s
 Cycle total: %s / %s (%.1f%%)
 Days until reset: %d`,
-		FormatBytes(float64(yesterdayBytes)*cfg.CalibrationFactor),
+		yesterday,
+		yesterdayText,
+		bucketNote,
 		FormatBytes(totalUsed),
 		FormatBytes(cfg.TotalBandwidth),
 		percent,
@@ -83,6 +96,33 @@ Days until reset: %d`,
 
 	SendMessage(env.AuthChatID, report)
 	log.Println("每日日报已推送")
+}
+
+func dailyReportDate(now time.Time, pushTimezone string) (string, string) {
+	loc, err := time.LoadLocation(pushTimezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	date := now.In(loc).AddDate(0, 0, -1).Format("2006-01-02")
+	note := "Daily buckets use VPS timezone (same as /daily)."
+	if date >= now.Format("2006-01-02") {
+		note += " Provisional: this VPS day has not ended yet."
+	}
+	return date, note
+}
+
+func dailyUsageText(date string, factor float64) (string, error) {
+	logs, err := GetDailyLogs(date, date)
+	if err != nil {
+		return "", err
+	}
+	if len(logs) == 0 {
+		return "No recorded data (not zero usage)", nil
+	}
+	if factor <= 0 {
+		factor = 1
+	}
+	return FormatBytes(float64(logs[0].RxBytes+logs[0].TxBytes) * factor), nil
 }
 
 func runDataCleanup(cfg *AppConfig) {
@@ -128,7 +168,10 @@ func alertCheckLoop(env *AppEnv) {
 		}
 
 		// Sync data
-		SyncVnStatToDB(env.InterfaceName)
+		if err := SyncVnStatToDB(env.InterfaceName); err != nil {
+			log.Printf("告警同步失败: %v", err)
+			continue
+		}
 
 		start, end := GetCycleDates(cfg.ResetDay, cfg.BillingTimezone)
 		cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
