@@ -33,13 +33,24 @@ template edits or changed accounts abort the upgrade. A single bounded recovery
 snapshot replaces `monitor-backup/upgrade.json`; the original install backup is
 retained. New categories accrue prospectively; old Other totals are not reclassified.
 
+Email is the accounting identity: different emails are separate; shared emails
+aggregate. The Bot checks the live account list every minute and on queries,
+automatically requesting an independent `traffic-bot-reconcile.service` for
+additions, removals or renames. New accounts receive unused mark IDs; surviving
+marks never shift. Changing UUID with the same email retains its accounting.
+Manual fallback: validate with `monitor_setup.py --plan-reconcile`, then use
+`--reconcile`. It records pending bytes, removes deleted accounts' monitoring
+outbounds/routes/counter chains, and keeps daily history and Telegram settings.
+X-UI/Xray briefly reloads; deleted users are never restored. Manual template
+edits abort safely. New accounts accrue only after their monitoring is activated.
+
 Counters measure the site's IP-layer bytes, including connection overhead, not
 the VPS's combined interface accounting. Cross-midnight samples are apportioned
 by elapsed time; resets or collection outages can limit completeness. Unknown or
 unobservable domains remain Other. The collector never resets X-UI API counters.
 The helper adds counter-only chains and socket marks, preserves credentials and
 existing blocking rules, and refuses conflicting fwmark policy routes.
-New/renamed users require reconciliation; mismatches fail explicitly.
+Account changes reconcile automatically; incompatible template edits fail explicitly.
 The original template is retained in `monitor-backup/`; `--rollback` restores it
 unless it has subsequently been edited. Existing Telegram credentials and Bot
 data are preserved. See [Chinese operational details](README_CN.md).

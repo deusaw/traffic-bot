@@ -8,6 +8,7 @@ Never changes authentication, ports, REALITY settings, firewall verdicts or IP r
 from __future__ import print_function
 import argparse
 import copy
+import fcntl
 import hashlib
 import json
 import os
@@ -106,7 +107,7 @@ def set_template(value):
 def digest(s):
     return hashlib.sha256(s.encode('utf-8')).hexdigest()
 
-def build_plan(upgrade=False):
+def build_plan(upgrade=False, reconcile=False):
     live = read_json(LIVE)
     original = template_value()
     template = json.loads(original)
@@ -132,8 +133,8 @@ def build_plan(upgrade=False):
         raise RuntimeError('Default outbound already uses socket marks; refusing to replace them')
     emails = sorted(set(u.get('email', '') for i in live.get('inbounds', [])
                         for u in i.get('settings', {}).get('clients', []) if u.get('email')))
-    if not emails or len(emails) > 200:
-        raise RuntimeError('Expected 1..200 uniquely labelled users')
+    if (not emails and not reconcile) or len(emails) > 65535:
+        raise RuntimeError('Expected labelled users within the mark ID space')
     if any(len(e) > 254 or any(ord(ch) < 32 for ch in e) for e in emails):
         raise RuntimeError('Invalid user email label')
     if any(o.get('tag', '').startswith('tbot-') for o in outbounds):
@@ -145,8 +146,17 @@ def build_plan(upgrade=False):
             if c['email'] in old_uids and old_uids[c['email']] != uid:
                 raise RuntimeError('Inconsistent existing account mapping')
             old_uids[c['email']] = uid
-        if set(old_uids) != set(emails):
+        if set(old_uids) != set(emails) and not reconcile:
             raise RuntimeError('Account set changed; review account mappings before upgrade')
+    next_uid = max(list(old_uids.values()) + [0]) + 1
+    if previous:
+        next_uid = max(next_uid, previous.get('next_uid', next_uid))
+    for email in emails:
+        if upgrade and email not in old_uids:
+            if next_uid > 65535:
+                raise RuntimeError('Accounting account ID space exhausted')
+            old_uids[email] = next_uid
+            next_uid += 1
     counters, rules, catchall = [], [], []
     for index, email in enumerate(emails, 1):
         uid = old_uids.get(email, index)
@@ -184,24 +194,40 @@ def build_plan(upgrade=False):
         os.unlink(path)
     if upgrade:
         mapped = dict((c['mark'], (c['email'], c['category'])) for c in counters)
-        if any(mapped.get(c['mark']) != (c['email'], c['category']) for c in previous['counters']):
+        if any(mapped.get(c['mark']) != (c['email'], c['category']) for c in previous['counters'] if c['email'] in emails):
             raise RuntimeError('Upgrade would change existing counter identities')
     manifest = {'version': 1, 'created': previous['created'] if upgrade else int(time.time()),
                 'inbound_sha256': digest(json.dumps(live.get('inbounds', []), sort_keys=True)),
                 'categories': CATEGORIES, 'counters': counters}
+    manifest['next_uid'] = next_uid if upgrade else len(emails) + 1
+    if previous and 'categories_updated' in previous:
+        manifest['categories_updated'] = previous['categories_updated']
     return original, template, manifest
 
-def upgrade_categories():
-    original, template, manifest = build_plan(upgrade=True)
+def retiring_manifest(previous, manifest):
+    transitional = copy.deepcopy(previous)
+    active = set(c['email'] for c in manifest['counters'])
+    for counter in transitional['counters']:
+        counter['retired'] = counter['email'] not in active
+    previous_emails = set(c['email'] for c in previous['counters'])
+    transitional['pending_emails'] = sorted(active - previous_emails)
+    return transitional
+
+def upgrade_categories(reconcile=False):
+    original, template, manifest = build_plan(upgrade=True, reconcile=reconcile)
     previous = read_json(MANIFEST)
     owner = read_json(BACKUP + '/owner.json')
     # One bounded recovery snapshot; original installation backup stays intact.
     write_json(BACKUP + '/upgrade.json', {'template': original, 'manifest': previous, 'owner': owner})
-    run([ROOT + '/traffic-bot', '--monitor-once'], cwd=ROOT, quiet=True)
     running = exists(['systemctl', 'is-active', '--quiet', 'traffic-bot'])
     if running:
         run(['systemctl', 'stop', 'traffic-bot'])
     try:
+        # Freeze the daemon, then collect pending bytes for removed accounts
+        # before excluding them. Explicit retired flags do not authorize users.
+        if reconcile:
+            write_json(MANIFEST, retiring_manifest(previous, manifest))
+        run([ROOT + '/traffic-bot', '--monitor-once'], cwd=ROOT, quiet=True)
         firewall(manifest)  # Append missing rules, never flush existing counters.
         value = json.dumps(template, separators=(',', ':'))
         set_template(value)
@@ -220,14 +246,24 @@ def upgrade_categories():
         for inbound in live.get('inbounds', []):
             if inbound.get('settings', {}).get('clients'):
                 run([XRAY, 'api', 'inboundusercount', '--server=127.0.0.1:%d' % ports[0], '-tag', inbound['tag']], quiet=True)
-        manifest['categories_updated'] = int(time.time())
+        if previous['categories'] != manifest['categories']:
+            manifest['categories_updated'] = int(time.time())
+        if reconcile:
+            manifest['accounts_updated'] = int(time.time())
+            # Include old connection teardown bytes before removing their rules.
+            run([ROOT + '/traffic-bot', '--monitor-once'], cwd=ROOT, quiet=True)
         write_json(MANIFEST, manifest)
         write_json(BACKUP + '/owner.json', {'applied_hash': digest(value)})
         run([ROOT + '/traffic-bot', '--monitor-once'], cwd=ROOT, quiet=True)
+        if reconcile:
+            prune_retired_counters(previous, manifest)
+        install_services()
     except Exception:
         set_template(original)
         write_json(MANIFEST, previous)
         write_json(BACKUP + '/owner.json', owner)
+        if reconcile:
+            firewall(previous)
         # Added rules have no matching old outbound and are harmless on recovery.
         # Keep existing kernel counts intact rather than flushing the chains.
         run(['systemctl', 'restart', 'x-ui'])
@@ -235,7 +271,29 @@ def upgrade_categories():
     finally:
         if running:
             run(['systemctl', 'start', 'traffic-bot'])
-    print('Upgraded to %d categories; existing marks and history preserved.' % len(CATEGORIES))
+    print('Synchronized %d accounts, %d categories; pending bytes and history preserved.' % (len(set(c['email'] for c in manifest['counters'])), len(CATEGORIES)))
+
+def prune_retired_counters(previous, manifest):
+    active_uids = set((c['mark'] >> 8) & 0xffff for c in manifest['counters'])
+    removed = [c for c in previous['counters'] if (c['mark'] >> 8) & 0xffff not in active_uids]
+    for binary in ('iptables', 'ip6tables'):
+        base = [binary, '-w', '-t', 'mangle']
+        for uid in sorted(set((c['mark'] >> 8) & 0xffff for c in removed)):
+            for parent, match, chain in ((UP, 'mark', 'TBOT_U%04x' % uid), (DOWN, 'connmark', 'TBOT_D%04x' % uid)):
+                args = ['-m', match, '--mark', hex(0x7a000000 | (uid << 8)) + '/0xffffff00', '-g', chain]
+                if exists(base + ['-C', parent] + args):
+                    run(base + ['-D', parent] + args)
+                if exists(base + ['-S', chain]):
+                    run(base + ['-F', chain])
+                    run(base + ['-X', chain])
+    conn = sqlite3.connect(ROOT + '/traffic-bot.db', timeout=10)
+    try:
+        for c in removed:
+            for family in ('iptables-save', 'ip6tables-save'):
+                conn.execute('DELETE FROM monitor_counters WHERE counter_key=?', (family + ':' + str(c['mark']),))
+        conn.commit()
+    finally:
+        conn.close()
 
 def firewall(manifest):
     for binary in ('iptables', 'ip6tables'):
@@ -301,6 +359,19 @@ WantedBy=multi-user.target
 '''
     with open('/etc/systemd/system/traffic-bot-accounting.service', 'w') as f:
         f.write(unit)
+    reconcile = '''[Unit]
+Description=Synchronize Traffic Bot account monitoring
+After=network.target
+ConditionPathExists=/etc/traffic-bot-monitor.json
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/traffic-bot
+ExecStart=/usr/bin/python /opt/traffic-bot/monitor_setup.py --reconcile
+TimeoutStartSec=180
+'''
+    with open('/etc/systemd/system/traffic-bot-reconcile.service', 'w') as f:
+        f.write(reconcile)
     run(['systemctl', 'daemon-reload'])
     run(['systemctl', 'enable', 'traffic-bot-accounting'])
 
@@ -358,12 +429,17 @@ def rollback():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
-    for action in ('plan', 'apply', 'rollback', 'restore-firewall', 'plan-upgrade', 'upgrade'):
+    for action in ('plan', 'apply', 'rollback', 'restore-firewall', 'plan-upgrade', 'upgrade', 'plan-reconcile', 'reconcile', 'install-services'):
         group.add_argument('--' + action, action='store_true')
     args = parser.parse_args()
     os.umask(0o077)
-    if args.plan or args.plan_upgrade:
-        _, _, manifest = build_plan(upgrade=args.plan_upgrade)
+    # Manual and automatic syncs share a runtime lock; never race template/DB edits.
+    lock = None
+    if args.apply or args.upgrade or args.reconcile or args.rollback:
+        lock = open('/run/traffic-bot-monitor.lock', 'w')
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    if args.plan or args.plan_upgrade or args.plan_reconcile:
+        _, _, manifest = build_plan(upgrade=args.plan_upgrade or args.plan_reconcile, reconcile=args.plan_reconcile)
         print('Validated plan: %d counters. Device labels:' % len(manifest['counters']))
         for c in manifest['counters']:
             if c['category'] == 'Other':
@@ -372,8 +448,12 @@ def main():
         apply()
     elif args.upgrade:
         upgrade_categories()
+    elif args.reconcile:
+        upgrade_categories(reconcile=True)
     elif args.restore_firewall:
         firewall(read_json(MANIFEST))
+    elif args.install_services:
+        install_services()
     else:
         rollback()
 

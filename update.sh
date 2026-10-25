@@ -49,4 +49,7 @@ fi
 for src in "$stage"/*.go "$stage"/go.mod "$stage"/go.sum "$stage"/install.sh "$stage"/update.sh "$stage"/monitor_setup.py "$stage"/README*.md; do
   [ ! -f "$src" ] || cp "$src" .
 done
+if [ -f /etc/traffic-bot-monitor.json ]; then
+  python /opt/traffic-bot/monitor_setup.py --install-services
+fi
 echo 'Traffic Bot updated. Database and credentials preserved.'

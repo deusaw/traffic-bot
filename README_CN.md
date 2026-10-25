@@ -25,9 +25,13 @@ python /opt/traffic-bot/monitor_setup.py --apply  # 备份原模板后接入；�
 - 只统计实际经过此 VPS 的连接。如果雷神将游戏封装在加密隧道里，可能只看到雷神或 Other；如果游戏经加速器直接出站、绕过此 VPS，这部分无法在 VPS 统计。每条连接只归入一个分类，不重复计算。未知 IP、不可识别的域名和规则未覆盖的地址归入 Other，不保证完整识别所有服务。
 - 计量来源是标记后的站点连接的 **IP 层**收发字节，含该连接协议开销，与 vnStat 的网卡双向总量口径不同。跨日采样按时间比例分摊；中断/重置期间未采样的部分无法保证完整。
 - 不读取并清零 X-UI 的 gRPC 计数；使用自有计数链（只设置连接标记和计数，不增加拦截/放行规则）。两级分派避免每个包遍历全部设备分类。已有 fwmark 策略路由等不兼容配置会拒绝自动接入。
-- 新增或修改账号后，需要同步监控模板；Bot 会检测配置不一致并报错，不会把漏记显示成真实 0。原模板在 `/opt/traffic-bot/monitor-backup`；`python /opt/traffic-bot/monitor_setup.py --rollback` 可撤销本次模板改动（如后续人工修改模板，则拒绝覆盖）。
+- 新增、删除或修改邮箱后自动同步监控模板；模板被手工修改等不兼容情况会明确报错，不会把漏记显示成真实 0。原模板在 `/opt/traffic-bot/monitor-backup`；`python /opt/traffic-bot/monitor_setup.py --rollback` 可撤销本次模板改动（如后续人工修改模板，则拒绝覆盖）。
 
 一次采样校验工具：`traffic-bot --monitor-once`（不连接 Telegram；会保存采样至现有 Bot 数据库）。
+
+邮箱是统计身份：不同邮箱分别统计，相同邮箱合并统计，不固定设备数量。更换 UUID 但保留邮箱会继续同一份统计；改邮箱视为新身份，旧邮箱历史保留。安装/同步后，Bot 每分钟检查一次实际账号列表，查询发现变化时也会触发独立的 `traffic-bot-reconcile.service` 自动同步，处理新增、删除和改名；同步期间查询会提示稍后重试，不把旧数据冒充最新值。
+
+手动校验/恢复命令是 `python /opt/traffic-bot/monitor_setup.py --plan-reconcile` 和 `--reconcile`。同步会先补记旧计数器尚未入库的流量，再移除已删除账号的监控出口、路由和自有计数链；新账号分配从未用过的编号，剩余账号的标记、历史日汇总与 Telegram 配置保留，短暂重载 X-UI/Xray。已删除账号不会被恢复。手工修改过模板时拒绝覆盖，保留原来的安全检查；默认 `--upgrade` 仍拒绝未同步的账号变化。新账号只能从接入监控后开始统计，无法回溯接入前未标记的连接。
 
 已启用旧分类的服务器，更新代码后运行 `python /opt/traffic-bot/monitor_setup.py --plan-upgrade` 校验，再运行 `--upgrade`。升级保留原账号及分类计数标记、数据库和 Telegram 配置，只追加缺少的计数规则，短暂重启 X-UI/Xray。已有模板被人工改动或账号不一致时拒绝覆盖。原始安装备份保留，最近一次升级恢复快照固定写入 `monitor-backup/upgrade.json`；不按次堆积备份。新增分类从升级后开始累计，升级前的 Other 历史不会被重新拆分。
 

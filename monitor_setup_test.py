@@ -1,5 +1,8 @@
 import copy
 import json
+import os
+import sqlite3
+import tempfile
 import unittest
 from unittest.mock import patch
 import monitor_setup as setup
@@ -87,6 +90,73 @@ class SetupSafetyTests(unittest.TestCase):
         with patch.object(setup, 'read_json', side_effect=[{}, {'counters': []}, {'applied_hash': 'different'}]), patch.object(setup, 'template_value', return_value='{}'), patch.object(setup.os.path, 'exists', return_value=True):
             with self.assertRaisesRegex(RuntimeError, 'template edited'):
                 setup.build_plan(upgrade=True)
+
+    def test_reconciliation_removes_only_deleted_account_and_keeps_survivor_ids(self):
+        live = {'inbounds': [{'settings': {'clients': [{'email': 'HOME'}]}}]}
+        old = {'created': 100, 'categories_updated': 200, 'next_uid': 10,
+               'counters': [{'mark': 0x7a000101, 'email': 'DELETED', 'category': 'YouTube'},
+                            {'mark': 0x7a000901, 'email': 'HOME', 'category': 'YouTube'}]}
+        value = json.dumps({'outbounds': [{'protocol': 'freedom'}, {'tag': 'tbot-1-1'}, {'tag': 'tbot-9-1'}],
+                            'routing': {'rules': [{'outboundTag': 'tbot-1-1'}, {'outboundTag': 'tbot-9-1'}]}})
+        values = {setup.LIVE: live, setup.MANIFEST: old,
+                  setup.BACKUP + '/owner.json': {'applied_hash': setup.digest(value)}}
+        with patch.object(setup, 'read_json', side_effect=values.__getitem__), patch.object(setup, 'template_value', return_value=value), patch.object(setup.os.path, 'exists', return_value=True), patch.object(setup, 'run', return_value=b''):
+            with self.assertRaisesRegex(RuntimeError, 'Account set changed'):
+                setup.build_plan(upgrade=True)
+            _, template, manifest = setup.build_plan(upgrade=True, reconcile=True)
+        self.assertEqual(set(c['email'] for c in manifest['counters']), {'HOME'})
+        self.assertTrue(all((c['mark'] >> 8) & 0xffff == 9 for c in manifest['counters']))
+        self.assertEqual(manifest['next_uid'], 10)
+        self.assertEqual(manifest['categories_updated'], 200)
+        self.assertFalse(any(o.get('tag', '').startswith('tbot-1-') for o in template['outbounds']))
+        transition = setup.retiring_manifest(old, manifest)
+        self.assertTrue(transition['counters'][0]['retired'])
+        self.assertFalse(transition['counters'][1]['retired'])
+        self.assertNotIn('retired', old['counters'][0])
+        # A mixed add/remove operation allocates above the old high-water mark.
+        live['inbounds'][0]['settings']['clients'].append({'email': 'NEW'})
+        with patch.object(setup, 'read_json', side_effect=values.__getitem__), patch.object(setup, 'template_value', return_value=value), patch.object(setup.os.path, 'exists', return_value=True), patch.object(setup, 'run', return_value=b''):
+            _, _, added = setup.build_plan(upgrade=True, reconcile=True)
+        self.assertEqual(set((c['mark'] >> 8) & 0xffff for c in added['counters'] if c['email'] == 'NEW'), {10})
+        self.assertEqual(added['next_uid'], 11)
+        self.assertEqual(setup.retiring_manifest(old, added)['pending_emails'], ['NEW'])
+
+    def test_retired_cleanup_keeps_active_rules_and_history(self):
+        removed = {'mark': 0x7a000101, 'email': 'REMOVED'}
+        active = {'mark': 0x7a000901, 'email': 'HOME'}
+        commands = []
+        with tempfile.TemporaryDirectory() as root:
+            conn = sqlite3.connect(os.path.join(root, 'traffic-bot.db'))
+            conn.execute('create table monitor_counters (counter_key text primary key, up integer, down integer)')
+            conn.execute('create table monitor_usage (email text, down integer)')
+            conn.execute('insert into monitor_usage values (?,?)', ('REMOVED', 800000000))
+            for c in (removed, active):
+                conn.execute('insert into monitor_counters values (?,1,2)', ('iptables-save:' + str(c['mark']),))
+            conn.commit()
+            with patch.object(setup, 'ROOT', root), patch.object(setup, 'exists', return_value=True), patch.object(setup, 'run', side_effect=lambda args: commands.append(args)):
+                setup.prune_retired_counters({'counters': [removed, active]}, {'counters': [active]})
+            self.assertEqual(conn.execute('select * from monitor_usage').fetchall(), [('REMOVED', 800000000)])
+            self.assertEqual(conn.execute('select counter_key from monitor_counters').fetchall(), [('iptables-save:' + str(active['mark']),)])
+            conn.close()
+        self.assertTrue(any('TBOT_U0001' in cmd for cmd in commands))
+        self.assertFalse(any('TBOT_U0009' in cmd or 'TBOT_D0009' in cmd for cmd in commands))
+
+    def test_failed_final_sample_restores_manifest_and_restarts_bot(self):
+        old = {'counters': [{'email': 'DELETED'}]}
+        new = {'counters': [{'email': 'HOME'}]}
+        owner = {'applied_hash': 'original'}
+        writes, commands = [], []
+        def run(args, **kw):
+            commands.append(args)
+            if '--monitor-once' in args:
+                raise RuntimeError('sample failed')
+            return b''
+        with patch.object(setup, 'build_plan', return_value=('original', {}, new)), patch.object(setup, 'read_json', side_effect=[old, owner]), patch.object(setup, 'write_json', side_effect=lambda path, data: writes.append((path, copy.deepcopy(data)))), patch.object(setup, 'set_template') as set_template, patch.object(setup, 'firewall'), patch.object(setup, 'exists', return_value=True), patch.object(setup, 'run', side_effect=run):
+            with self.assertRaisesRegex(RuntimeError, 'sample failed'):
+                setup.upgrade_categories(reconcile=True)
+        self.assertEqual([value for path, value in writes if path == setup.MANIFEST][-1], old)
+        set_template.assert_called_once_with('original')
+        self.assertEqual(commands[-1], ['systemctl', 'start', 'traffic-bot'])
 
 
 if __name__ == '__main__':

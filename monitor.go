@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -22,16 +23,18 @@ type MonitorCounter struct {
 	Mark     uint32 `json:"mark"`
 	Email    string `json:"email"`
 	Category string `json:"category"`
+	Retired  bool   `json:"retired,omitempty"`
 }
 type MonitorCategory struct {
 	Name    string   `json:"name"`
 	Domains []string `json:"domains"`
 }
 type MonitorConfig struct {
-	Version    int               `json:"version"`
-	Created    int64             `json:"created"`
-	Counters   []MonitorCounter  `json:"counters"`
-	Categories []MonitorCategory `json:"categories"`
+	Version       int               `json:"version"`
+	Created       int64             `json:"created"`
+	Counters      []MonitorCounter  `json:"counters"`
+	Categories    []MonitorCategory `json:"categories"`
+	PendingEmails []string          `json:"pending_emails,omitempty"`
 }
 type usageRow struct {
 	Email, Category string
@@ -44,6 +47,9 @@ type counterValue struct {
 }
 
 var monitorMu sync.Mutex
+var reconcileMu sync.Mutex
+var lastReconcileRequest time.Time
+var errMonitorAccountsChanged = errors.New("Xray accounts/accounting template changed")
 var beijing = time.FixedZone("Asia/Shanghai", 8*60*60)
 var counterLine = regexp.MustCompile(`^\[\d+:(\d+)\] -A (TBOT_U[0-9a-f]{4}|TBOT_D[0-9a-f]{4}) .* --mark (0x[0-9a-fA-F]+|[0-9]+)(?:/\S+)? -j RETURN$`)
 
@@ -60,7 +66,7 @@ func loadMonitorConfig() (*MonitorConfig, error) {
 	if err = json.Unmarshal(b, &c); err != nil {
 		return nil, err
 	}
-	if c.Version != 1 || len(c.Counters) == 0 || c.Created <= 0 {
+	if c.Version != 1 || c.Created <= 0 {
 		return nil, fmt.Errorf("unsupported or empty monitor configuration")
 	}
 	marks := map[uint32]bool{}
@@ -284,13 +290,36 @@ func startMonitor() {
 	go func() {
 		var lastError time.Time
 		for {
-			if err := syncMonitor(); err != nil && time.Since(lastError) > 15*time.Minute {
-				log.Printf("monitor collection: %v", err)
-				lastError = time.Now()
+			if err := syncMonitor(); err != nil {
+				if errors.Is(err, errMonitorAccountsChanged) {
+					if requestErr := requestMonitorReconcile(); requestErr != nil {
+						err = fmt.Errorf("%v; automatic sync: %w", err, requestErr)
+					}
+				}
+				if time.Since(lastError) > 15*time.Minute {
+					log.Printf("monitor collection: %v", err)
+					lastError = time.Now()
+				}
 			}
 			time.Sleep(time.Until(time.Now().Truncate(time.Minute).Add(time.Minute)))
 		}
 	}()
+}
+
+func requestMonitorReconcile() error {
+	reconcileMu.Lock()
+	defer reconcileMu.Unlock()
+	if time.Since(lastReconcileRequest) < time.Minute {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// An independent unit survives stopping the Bot during its final sample.
+	if err := exec.CommandContext(ctx, "systemctl", "start", "--no-block", "traffic-bot-reconcile.service").Run(); err != nil {
+		return err
+	}
+	lastReconcileRequest = time.Now()
+	return nil
 }
 
 func monitorPeriod(now time.Time) (int64, int64) {
@@ -324,6 +353,12 @@ func handleMonitor(env *AppEnv, chatID int64, command string) {
 	}
 	if err = syncMonitor(); err != nil {
 		log.Printf("monitor query: %v", err)
+		if errors.Is(err, errMonitorAccountsChanged) {
+			if requestMonitorReconcile() == nil {
+				SendPlainMessage(chatID, "检测到账号变化，正在自动同步监控，请稍后重试。已有历史用量会保留。")
+				return
+			}
+		}
 		SendPlainMessage(chatID, "设备监控刷新失败，未返回旧值。请检查专用计数规则。")
 		return
 	}
@@ -406,6 +441,14 @@ func handleMonitor(env *AppEnv, chatID int64, command string) {
 }
 
 func validateMonitorAccounts(conf *MonitorConfig) error {
+	b, err := os.ReadFile("/usr/local/x-ui/bin/config.json")
+	if err != nil {
+		return err
+	}
+	return validateMonitorAccountData(conf, b)
+}
+
+func validateMonitorAccountData(conf *MonitorConfig, b []byte) error {
 	var live struct {
 		Inbounds []struct {
 			Settings struct {
@@ -422,11 +465,7 @@ func validateMonitorAccounts(conf *MonitorConfig) error {
 			} `json:"streamSettings"`
 		} `json:"outbounds"`
 	}
-	b, err := os.ReadFile("/usr/local/x-ui/bin/config.json")
-	if err != nil {
-		return err
-	}
-	if err = json.Unmarshal(b, &live); err != nil {
+	if err := json.Unmarshal(b, &live); err != nil {
 		return err
 	}
 	emails := map[string]bool{}
@@ -442,14 +481,28 @@ func validateMonitorAccounts(conf *MonitorConfig) error {
 		marks[o.StreamSettings.Sockopt.Mark] = true
 	}
 	expected := map[string]bool{}
+	for _, email := range conf.PendingEmails {
+		if !emails[email] {
+			return fmt.Errorf("pending accounting account disappeared")
+		}
+		expected[email] = true
+	}
 	for _, c := range conf.Counters {
+		// Only the explicit reconciliation helper may retire a missing account
+		// for its final sample. Active/unknown accounts still fail closed.
+		if c.Retired {
+			if emails[c.Email] {
+				return fmt.Errorf("retired accounting account is still active")
+			}
+			continue
+		}
 		expected[c.Email] = true
 		if !emails[c.Email] || !marks[c.Mark] {
-			return fmt.Errorf("Xray accounts/accounting template changed; accounting rules need reconciliation")
+			return fmt.Errorf("%w; accounting rules need reconciliation", errMonitorAccountsChanged)
 		}
 	}
 	if len(expected) != len(emails) {
-		return fmt.Errorf("new Xray accounts found; accounting rules need reconciliation")
+		return fmt.Errorf("%w; new accounts need reconciliation", errMonitorAccountsChanged)
 	}
 	return nil
 }

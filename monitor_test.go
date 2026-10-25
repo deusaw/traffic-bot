@@ -6,6 +6,38 @@ import (
 	"time"
 )
 
+func TestExplicitRetirementCollectsRemovedAccountsWithoutAuthorizingThem(t *testing.T) {
+	conf := &MonitorConfig{Counters: []MonitorCounter{
+		{Mark: 0x7a000101, Email: "REMOVED", Category: "YouTube", Retired: true},
+		{Mark: 0x7a000201, Email: "HOME", Category: "YouTube"},
+	}}
+	live := []byte(`{"inbounds":[{"settings":{"clients":[{"email":"HOME"}]}}],"outbounds":[{"streamSettings":{"sockopt":{"mark":2046820865}}}]}`)
+	if err := validateMonitorAccountData(conf, live); err != nil {
+		t.Fatal(err)
+	}
+	conf.Counters[0].Retired = false
+	if err := validateMonitorAccountData(conf, live); err == nil {
+		t.Fatal("missing active account must fail until explicitly reconciled")
+	}
+	conf.Counters[0].Retired = true
+	conf.Counters[1].Retired = true
+	if err := validateMonitorAccountData(conf, live); err == nil {
+		t.Fatal("an active account cannot be declared retired")
+	}
+	conf.Counters[1].Retired = false
+	withNew := []byte(`{"inbounds":[{"settings":{"clients":[{"email":"HOME"},{"email":"NEW"}]}}],"outbounds":[{"streamSettings":{"sockopt":{"mark":2046820865}}}]}`)
+	if err := validateMonitorAccountData(conf, withNew); err == nil {
+		t.Fatal("unknown new accounts require reconciliation")
+	}
+	conf.PendingEmails = []string{"NEW"}
+	if err := validateMonitorAccountData(conf, withNew); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateMonitorAccountData(&MonitorConfig{}, []byte(`{"inbounds":[],"outbounds":[]}`)); err != nil {
+		t.Fatal("removing the last user should allow an empty active monitor", err)
+	}
+}
+
 func testMonitorDB(t *testing.T) {
 	t.Helper()
 	if err := InitDB(":memory:"); err != nil {
