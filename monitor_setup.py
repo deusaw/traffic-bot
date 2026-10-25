@@ -35,8 +35,26 @@ CATEGORIES = [
     {'name': 'OpenAI', 'domains': ['openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com']},
     {'name': 'Telegram', 'domains': ['telegram.org', 't.me', 'telegram.me', 'telegram.dog', 'telesco.pe']},
     {'name': 'Bilibili', 'domains': ['bilibili.com', 'bilibili.tv', 'b23.tv', 'bilivideo.com', 'bilivideo.cn', 'hdslb.com']},
-    {'name': 'Other', 'domains': []}
+    {'name': 'Other', 'domains': []},
+    {'name': 'TikTok', 'domains': ['tiktok.com', 'tiktokv.com', 'tiktokcdn.com', 'tiktokcdn-us.com', 'tiktokcdn-eu.com', 'musical.ly']},
+    {'name': 'Douyin', 'domains': ['douyin.com', 'douyincdn.com', 'douyinpic.com', 'douyinvod.com', 'iesdouyin.com', 'amemv.com']},
+    {'name': 'Instagram', 'domains': ['instagram.com', 'cdninstagram.com']},
+    {'name': 'Facebook', 'domains': ['facebook.com', 'facebook.net', 'fbcdn.net', 'fb.com', 'messenger.com']},
+    {'name': 'Steam', 'domains': ['steampowered.com', 'steamcommunity.com', 'steamcontent.com', 'steamstatic.com', 'steamserver.net', 's.team']},
+    {'name': 'EpicGames', 'domains': ['epicgames.com', 'epicgames.dev', 'epicgamescdn.com', 'fortnite.com', 'unrealengine.com', 'unrealtournament.com', 'easyanticheat.net', 'easy.ac', 'eac-cdn.com']},
+    {'name': 'Roblox', 'domains': ['roblox.com', 'robloxlabs.com', 'rbxcdn.com', 'rbxinfra.net', 'rbx.com', 'rblx.com', 'rblx.co'], 'ips': ['128.116.0.0/17']},
+    {'name': 'Leigod', 'domains': ['leigod.com', 'leigod.cn', 'leigodjsq.com', 'ls66.cn', 'nnbooster.com', 'xxghh.biz', 'gangwan.com', 'nn.com', 'waifushangcheng.com']},
+    {'name': 'iCloud', 'domains': ['icloud.com', 'icloud.com.cn', 'icloud-content.com', 'me.com']},
+    {'name': 'OneDrive', 'domains': ['1drv.com', '1drv.ms', 'onedrive.com', 'onedrive.net', 'onedrive.live.com', 'storage.live.com', 'livefilestore.com']},
+    {'name': 'Dropbox', 'domains': ['dropbox.com', 'dropboxapi.com', 'dropboxusercontent.com', 'dropboxstatic.com', 'dropbox-dns.com']},
+    {'name': 'MEGA', 'domains': ['mega.nz', 'mega.co.nz', 'mega.io']},
+    {'name': 'AppleUpdate', 'domains': ['appldnld.apple.com', 'gdmf.apple.com', 'gdmf-ados.apple.com', 'mesu.apple.com', 'oscdn.apple.com', 'osrecovery.apple.com', 'swcdn.apple.com', 'swdist.apple.com', 'swdownload.apple.com', 'swscan.apple.com', 'updates.cdn-apple.com', 'updates-http.cdn-apple.com']},
+    {'name': 'Microsoft', 'domains': ['microsoft.com', 'microsoftonline.com', 'office.com', 'office.net', 'office365.com', 'windows.com', 'windows.net', 'windowsupdate.com', 'update.microsoft.com', 'delivery.mp.microsoft.com', 'dl.delivery.mp.microsoft.com']}
 ]
+# Category IDs are persistent database identities: never reorder this list.
+# Domain sources: github.com/v2fly/domain-list-community/tree/master/data
+# Roblox IP ownership: rdap.arin.net/registry/ip/128.116.0.0 (Roblox /17).
+# Shared cloud IPs and broad UDP port ranges deliberately remain unclassified.
 
 def run(args, quiet=False, cwd=None):
     out = subprocess.check_output(args, stderr=subprocess.STDOUT, cwd=cwd)
@@ -88,14 +106,20 @@ def set_template(value):
 def digest(s):
     return hashlib.sha256(s.encode('utf-8')).hexdigest()
 
-def build_plan():
+def build_plan(upgrade=False):
     live = read_json(LIVE)
     original = template_value()
     template = json.loads(original)
     previous = read_json(MANIFEST) if os.path.exists(MANIFEST) else None
-    if previous:
+    if previous and not upgrade:
         raise RuntimeError('Monitor already configured; use --restore-firewall or --rollback before reconfiguring')
-    for binary in ('iptables', 'ip6tables'):
+    if upgrade:
+        if not previous or digest(original) != read_json(BACKUP + '/owner.json')['applied_hash']:
+            raise RuntimeError('Missing integration or template edited since install; refusing upgrade')
+        owned = set('tbot-%d-%d' % ((c['mark'] >> 8) & 0xffff, c['mark'] & 255) for c in previous['counters'])
+        template['outbounds'] = [o for o in template.get('outbounds', []) if o.get('tag') not in owned]
+        template.setdefault('routing', {})['rules'] = [r for r in template.get('routing', {}).get('rules', []) if r.get('outboundTag') not in owned]
+    for binary in (() if upgrade else ('iptables', 'ip6tables')):
         rules = run([binary, '-t', 'mangle', '-S'], quiet=True).decode().splitlines()
         if any(line.startswith('-N TBOT_') for line in rules):
             raise RuntimeError('Reserved accounting chain already exists; refusing to take ownership')
@@ -114,8 +138,18 @@ def build_plan():
         raise RuntimeError('Invalid user email label')
     if any(o.get('tag', '').startswith('tbot-') for o in outbounds):
         raise RuntimeError('Reserved outbound tag already exists')
+    old_uids = {}
+    if upgrade:
+        for c in previous['counters']:
+            uid = (c['mark'] >> 8) & 0xffff
+            if c['email'] in old_uids and old_uids[c['email']] != uid:
+                raise RuntimeError('Inconsistent existing account mapping')
+            old_uids[c['email']] = uid
+        if set(old_uids) != set(emails):
+            raise RuntimeError('Account set changed; review account mappings before upgrade')
     counters, rules, catchall = [], [], []
-    for uid, email in enumerate(emails, 1):
+    for index, email in enumerate(emails, 1):
+        uid = old_uids.get(email, index)
         for cid, category in enumerate(CATEGORIES, 1):
             mark = 0x7a000000 | (uid << 8) | cid
             tag = 'tbot-%d-%d' % (uid, cid)
@@ -129,7 +163,10 @@ def build_plan():
                 if category.get('geosite'):
                     rule['domain'].append('geosite:' + category['geosite'])
                 rules.append(rule)
-            else:
+            if category.get('ips'):
+                # Separate rules implement domain OR IP, not Xray's field AND.
+                rules.append({'type': 'field', 'user': [email], 'ip': category['ips'], 'outboundTag': tag})
+            if not category['domains'] and not category.get('ips'):
                 catchall.append(rule)
             counters.append({'mark': mark, 'email': email, 'category': category['name']})
     # Existing API/private-network/BT blocking rules keep their priority.
@@ -145,10 +182,60 @@ def build_plan():
         run([XRAY, 'run', '-test', '-config', path], cwd='/usr/local/x-ui')
     finally:
         os.unlink(path)
-    manifest = {'version': 1, 'created': int(time.time()),
+    if upgrade:
+        mapped = dict((c['mark'], (c['email'], c['category'])) for c in counters)
+        if any(mapped.get(c['mark']) != (c['email'], c['category']) for c in previous['counters']):
+            raise RuntimeError('Upgrade would change existing counter identities')
+    manifest = {'version': 1, 'created': previous['created'] if upgrade else int(time.time()),
                 'inbound_sha256': digest(json.dumps(live.get('inbounds', []), sort_keys=True)),
                 'categories': CATEGORIES, 'counters': counters}
     return original, template, manifest
+
+def upgrade_categories():
+    original, template, manifest = build_plan(upgrade=True)
+    previous = read_json(MANIFEST)
+    owner = read_json(BACKUP + '/owner.json')
+    # One bounded recovery snapshot; original installation backup stays intact.
+    write_json(BACKUP + '/upgrade.json', {'template': original, 'manifest': previous, 'owner': owner})
+    run([ROOT + '/traffic-bot', '--monitor-once'], cwd=ROOT, quiet=True)
+    running = exists(['systemctl', 'is-active', '--quiet', 'traffic-bot'])
+    if running:
+        run(['systemctl', 'stop', 'traffic-bot'])
+    try:
+        firewall(manifest)  # Append missing rules, never flush existing counters.
+        value = json.dumps(template, separators=(',', ':'))
+        set_template(value)
+        run(['systemctl', 'restart', 'x-ui'])
+        time.sleep(3)
+        run(['systemctl', 'is-active', 'x-ui'])
+        live = read_json(LIVE)
+        if digest(json.dumps(live.get('inbounds', []), sort_keys=True)) != manifest['inbound_sha256']:
+            raise RuntimeError('Inbound identity changed during upgrade')
+        marks = set(o.get('streamSettings', {}).get('sockopt', {}).get('mark') for o in live.get('outbounds', []))
+        if not all(c['mark'] in marks for c in manifest['counters']):
+            raise RuntimeError('Expanded outbounds did not become active')
+        ports = [i['port'] for i in live.get('inbounds', []) if i.get('tag') == 'api' and i.get('listen') == '127.0.0.1']
+        if not ports:
+            raise RuntimeError('Local Xray health endpoint not found')
+        for inbound in live.get('inbounds', []):
+            if inbound.get('settings', {}).get('clients'):
+                run([XRAY, 'api', 'inboundusercount', '--server=127.0.0.1:%d' % ports[0], '-tag', inbound['tag']], quiet=True)
+        manifest['categories_updated'] = int(time.time())
+        write_json(MANIFEST, manifest)
+        write_json(BACKUP + '/owner.json', {'applied_hash': digest(value)})
+        run([ROOT + '/traffic-bot', '--monitor-once'], cwd=ROOT, quiet=True)
+    except Exception:
+        set_template(original)
+        write_json(MANIFEST, previous)
+        write_json(BACKUP + '/owner.json', owner)
+        # Added rules have no matching old outbound and are harmless on recovery.
+        # Keep existing kernel counts intact rather than flushing the chains.
+        run(['systemctl', 'restart', 'x-ui'])
+        raise
+    finally:
+        if running:
+            run(['systemctl', 'start', 'traffic-bot'])
+    print('Upgraded to %d categories; existing marks and history preserved.' % len(CATEGORIES))
 
 def firewall(manifest):
     for binary in ('iptables', 'ip6tables'):
@@ -271,18 +358,20 @@ def rollback():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
-    for action in ('plan', 'apply', 'rollback', 'restore-firewall'):
+    for action in ('plan', 'apply', 'rollback', 'restore-firewall', 'plan-upgrade', 'upgrade'):
         group.add_argument('--' + action, action='store_true')
     args = parser.parse_args()
     os.umask(0o077)
-    if args.plan:
-        _, _, manifest = build_plan()
+    if args.plan or args.plan_upgrade:
+        _, _, manifest = build_plan(upgrade=args.plan_upgrade)
         print('Validated plan: %d counters. Device labels:' % len(manifest['counters']))
         for c in manifest['counters']:
             if c['category'] == 'Other':
                 print(c['email'])
     elif args.apply:
         apply()
+    elif args.upgrade:
+        upgrade_categories()
     elif args.restore_firewall:
         firewall(read_json(MANIFEST))
     else:

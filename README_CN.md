@@ -19,13 +19,17 @@ python /opt/traffic-bot/monitor_setup.py --apply  # 备份原模板后接入；�
 - `/sites HOME`：HOME 的网站分类用量；也可填写完整 email。
 - `/devices 2026-10-25`、`/sites HOME 2026-10-25`：查询指定北京时间日期。
 - 新统计固定按北京时间 **00:00–次日 00:00** 分天，独立于 VPS、计费和推送时区。旧 vnStat 日记录仍使用 VPS 时区，不能反推启用前的北京时间明细。
-- 每分钟采样、查询即时刷新，数据库仅保留最近 **30 天日汇总**；六设备六分类最多约 1080 行用量数据。没有访问日志、域名明细、来源 IP 历史或抓包文件。
-- 分类目前包含 YouTube（含视频/图片 CDN 及现有 geosite:youtube 规则）、Netflix、OpenAI、Telegram、Bilibili、Other。IP 直连、不可识别/加密的域名及规则未覆盖的域名归入 Other；不保证识别所有服务流量。
+- 每分钟采样、查询即时刷新，数据库仅保留最近 **30 天日汇总**；六设备二十分类最多约 3600 行用量数据。没有访问日志、域名明细、来源 IP 历史或抓包文件。
+- 支持 20 类：YouTube、Netflix、OpenAI、Telegram、Bilibili、TikTok、抖音（Douyin）、Instagram、Facebook、Steam、EpicGames、Roblox、雷神（Leigod）、iCloud、OneDrive、Dropbox、MEGA、苹果更新（AppleUpdate）、微软服务/更新（Microsoft）、Other。分类使用完整域名后缀；YouTube 额外使用现有 geosite 规则，OneDrive 的规则优先于微软通用规则。
+- Roblox 同时匹配服务域名和 [ARIN 确认为 Roblox 所有的 128.116.0.0/17](https://rdap.arin.net/registry/ip/128.116.0.0)；不会把所有高位 UDP 端口或共享云服务 IP 都算作游戏。雷神域名参考 [domain-list-community 的加速器分类](https://github.com/v2fly/domain-list-community/blob/master/data/category-game-accelerator-cn)，游戏域名参考其 [Roblox 分类](https://github.com/v2fly/domain-list-community/blob/master/data/roblox)。
+- 只统计实际经过此 VPS 的连接。如果雷神将游戏封装在加密隧道里，可能只看到雷神或 Other；如果游戏经加速器直接出站、绕过此 VPS，这部分无法在 VPS 统计。每条连接只归入一个分类，不重复计算。未知 IP、不可识别的域名和规则未覆盖的地址归入 Other，不保证完整识别所有服务。
 - 计量来源是标记后的站点连接的 **IP 层**收发字节，含该连接协议开销，与 vnStat 的网卡双向总量口径不同。跨日采样按时间比例分摊；中断/重置期间未采样的部分无法保证完整。
 - 不读取并清零 X-UI 的 gRPC 计数；使用自有计数链（只设置连接标记和计数，不增加拦截/放行规则）。两级分派避免每个包遍历全部设备分类。已有 fwmark 策略路由等不兼容配置会拒绝自动接入。
 - 新增或修改账号后，需要同步监控模板；Bot 会检测配置不一致并报错，不会把漏记显示成真实 0。原模板在 `/opt/traffic-bot/monitor-backup`；`python /opt/traffic-bot/monitor_setup.py --rollback` 可撤销本次模板改动（如后续人工修改模板，则拒绝覆盖）。
 
 一次采样校验工具：`traffic-bot --monitor-once`（不连接 Telegram；会保存采样至现有 Bot 数据库）。
+
+已启用旧分类的服务器，更新代码后运行 `python /opt/traffic-bot/monitor_setup.py --plan-upgrade` 校验，再运行 `--upgrade`。升级保留原账号及分类计数标记、数据库和 Telegram 配置，只追加缺少的计数规则，短暂重启 X-UI/Xray。已有模板被人工改动或账号不一致时拒绝覆盖。原始安装备份保留，最近一次升级恢复快照固定写入 `monitor-backup/upgrade.json`；不按次堆积备份。新增分类从升级后开始累计，升级前的 Other 历史不会被重新拆分。
 
 ### 实时查询与日报日期
 

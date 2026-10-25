@@ -17,7 +17,21 @@ New accounting uses **Asia/Shanghai midnight boundaries**, samples once per minu
 and refreshes on queries. Only daily device/category byte aggregates are retained,
 automatically expiring after 30 days. No access logs, browsing history, source IP
 history or packet captures are collected. YouTube (including the installed
-geosite rule), Netflix, OpenAI, Telegram, Bilibili and Other are supported.
+geosite rule), Netflix, OpenAI, Telegram, Bilibili, TikTok, Douyin, Instagram,
+Facebook, Steam, EpicGames, Roblox, Leigod, iCloud, OneDrive, Dropbox, MEGA,
+AppleUpdate, Microsoft and Other are supported (20 categories).
+Roblox also matches its ARIN-registered 128.116.0.0/17 network. Shared cloud
+networks and broad UDP port ranges are not labelled as games. Only connections
+passing through this VPS are measurable; an accelerator tunnel can hide Roblox
+behind Leigod or Other. Each connection belongs to one category only.
+
+Existing integrations: after updating source, validate with
+`python /opt/traffic-bot/monitor_setup.py --plan-upgrade`, then `--upgrade`.
+This preserves existing counter identities/history and Telegram settings, appends
+missing rules without resetting counts, and briefly restarts X-UI/Xray. Manual
+template edits or changed accounts abort the upgrade. A single bounded recovery
+snapshot replaces `monitor-backup/upgrade.json`; the original install backup is
+retained. New categories accrue prospectively; old Other totals are not reclassified.
 
 Counters measure the site's IP-layer bytes, including connection overhead, not
 the VPS's combined interface accounting. Cross-midnight samples are apportioned
