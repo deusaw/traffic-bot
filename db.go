@@ -2,7 +2,9 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"sync"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -19,6 +21,9 @@ type AppConfig struct {
 	LastAlertPercent  int
 	SetupStep         int // 0=complete, 1-5=wizard, 6=sync input, 7=calibrate input, 8=calibrate confirm
 	LastResetCycle    string
+	PendingFactor     float64
+	PendingRawBytes   int64
+	PendingUsage      float64
 }
 
 type DailyTrafficLog struct {
@@ -71,6 +76,9 @@ func InitDB(dbPath string) error {
 		"ALTER TABLE app_config ADD COLUMN timezone VARCHAR DEFAULT ''",
 		"ALTER TABLE app_config ADD COLUMN push_timezone VARCHAR DEFAULT ''",
 		"ALTER TABLE app_config ADD COLUMN billing_timezone VARCHAR DEFAULT ''",
+		"ALTER TABLE app_config ADD COLUMN pending_factor REAL DEFAULT 0",
+		"ALTER TABLE app_config ADD COLUMN pending_raw_bytes INTEGER DEFAULT 0",
+		"ALTER TABLE app_config ADD COLUMN pending_usage REAL DEFAULT 0",
 	}
 	for _, m := range migrations {
 		db.Exec(m)
@@ -79,16 +87,41 @@ func InitDB(dbPath string) error {
 }
 
 func GetConfig() (*AppConfig, error) {
+	cfg, _, _, err := GetCycleConfig()
+	return cfg, err
+}
+
+// Configuration and billing dates share one clock snapshot, including when a
+// vnStat refresh crosses midnight just before the caller asks for the totals.
+func GetCycleConfig() (*AppConfig, time.Time, time.Time, error) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	cfg, err := readConfig()
+	if err != nil {
+		return nil, time.Time{}, time.Time{}, err
+	}
+	now := billingTime(cfg, time.Now())
+	if reconcileBillingCycle(cfg, now) {
+		if err = saveConfig(cfg); err != nil {
+			return nil, time.Time{}, time.Time{}, err
+		}
+	}
+	start, end := cycleDatesAt(now, cfg.ResetDay)
+	return cfg, start, end, nil
+}
+
+func readConfig() (*AppConfig, error) {
 	cfg := &AppConfig{}
 	err := db.QueryRow(`SELECT total_bandwidth, reset_day, daily_push_time,
 		COALESCE(push_timezone, COALESCE(timezone, '')),
 		COALESCE(billing_timezone, COALESCE(timezone, '')),
 		usage_offset, calibration_factor, last_alert_percentage, setup_step,
-		COALESCE(last_reset_cycle, '') FROM app_config WHERE id=1`).
+		COALESCE(last_reset_cycle, ''), pending_factor, pending_raw_bytes, pending_usage FROM app_config WHERE id=1`).
 		Scan(&cfg.TotalBandwidth, &cfg.ResetDay, &cfg.DailyPushTime,
 			&cfg.PushTimezone, &cfg.BillingTimezone,
 			&cfg.UsageOffset, &cfg.CalibrationFactor,
-			&cfg.LastAlertPercent, &cfg.SetupStep, &cfg.LastResetCycle)
+			&cfg.LastAlertPercent, &cfg.SetupStep, &cfg.LastResetCycle,
+			&cfg.PendingFactor, &cfg.PendingRawBytes, &cfg.PendingUsage)
 	return cfg, err
 }
 
@@ -96,18 +129,72 @@ func UpdateConfig(fn func(cfg *AppConfig)) error {
 	configMu.Lock()
 	defer configMu.Unlock()
 
-	cfg, err := GetConfig()
+	cfg, err := readConfig()
 	if err != nil {
 		return err
 	}
+	reconcileBillingCycle(cfg, time.Now())
 	fn(cfg)
-	_, err = db.Exec(`UPDATE app_config SET total_bandwidth=?, reset_day=?, daily_push_time=?,
+	// Complete first-time setup without throwing away a current-cycle sync.
+	if cfg.LastResetCycle == "" {
+		reconcileBillingCycle(cfg, time.Now())
+	}
+	return saveConfig(cfg)
+}
+
+func saveConfig(cfg *AppConfig) error {
+	if !finiteNumber(cfg.TotalBandwidth) || cfg.TotalBandwidth < 0 ||
+		!finiteNumber(cfg.UsageOffset) || !finiteNumber(cfg.CalibrationFactor) || cfg.CalibrationFactor <= 0 ||
+		!finiteNumber(cfg.PendingFactor) || cfg.PendingFactor < 0 || cfg.PendingRawBytes < 0 ||
+		!finiteNumber(cfg.PendingUsage) || cfg.PendingUsage < 0 {
+		return fmt.Errorf("invalid or non-finite traffic configuration")
+	}
+	_, err := db.Exec(`UPDATE app_config SET total_bandwidth=?, reset_day=?, daily_push_time=?,
 		push_timezone=?, billing_timezone=?, usage_offset=?, calibration_factor=?,
-		last_alert_percentage=?, setup_step=?, last_reset_cycle=? WHERE id=1`,
+		last_alert_percentage=?, setup_step=?, last_reset_cycle=?, pending_factor=?, pending_raw_bytes=?, pending_usage=? WHERE id=1`,
 		cfg.TotalBandwidth, cfg.ResetDay, cfg.DailyPushTime,
 		cfg.PushTimezone, cfg.BillingTimezone, cfg.UsageOffset, cfg.CalibrationFactor,
-		cfg.LastAlertPercent, cfg.SetupStep, cfg.LastResetCycle)
+		cfg.LastAlertPercent, cfg.SetupStep, cfg.LastResetCycle,
+		cfg.PendingFactor, cfg.PendingRawBytes, cfg.PendingUsage)
 	return err
+}
+
+// Runs under configMu before every config read/write. Calendar changes never
+// depend on the daily report being enabled or successfully sent.
+func reconcileBillingCycle(cfg *AppConfig, now time.Time) bool {
+	if cfg.SetupStep >= 1 && cfg.SetupStep <= 5 || cfg.ResetDay < 1 || cfg.ResetDay > 31 {
+		return false
+	}
+	now = billingTime(cfg, now)
+	start, _ := cycleDatesAt(now, cfg.ResetDay)
+	cycle := start.Format("2006-01-02")
+	if cfg.LastResetCycle == "" {
+		cfg.LastResetCycle = cycle
+		return true
+	}
+	if cycle > cfg.LastResetCycle {
+		cfg.UsageOffset, cfg.LastAlertPercent = 0, 0
+		cfg.LastResetCycle = cycle
+		clearPendingCalibration(cfg)
+		if cfg.SetupStep == 8 {
+			cfg.SetupStep = 0
+		}
+		return true
+	}
+	return false
+}
+
+func billingTime(cfg *AppConfig, now time.Time) time.Time {
+	if cfg.BillingTimezone != "" {
+		if loc, err := time.LoadLocation(cfg.BillingTimezone); err == nil {
+			return now.In(loc)
+		}
+	}
+	return now
+}
+
+func clearPendingCalibration(cfg *AppConfig) {
+	cfg.PendingFactor, cfg.PendingRawBytes, cfg.PendingUsage = 0, 0, 0
 }
 
 func UpsertDailyTraffic(date string, rx, tx int64) error {

@@ -82,6 +82,12 @@ def write_json(path, value):
             os.fsync(f.fileno())
         os.chmod(temp, 0o600)
         os.rename(temp, path)
+        if hasattr(os, 'O_DIRECTORY'):
+            directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         if os.path.exists(temp):
             os.unlink(temp)
@@ -200,12 +206,14 @@ def build_plan(upgrade=False, reconcile=False):
                 'inbound_sha256': digest(json.dumps(live.get('inbounds', []), sort_keys=True)),
                 'categories': CATEGORIES, 'counters': counters}
     manifest['next_uid'] = next_uid if upgrade else len(emails) + 1
-    if previous and 'categories_updated' in previous:
-        manifest['categories_updated'] = previous['categories_updated']
+    for key in ('categories_updated', 'accounts_updated'):
+        if previous and key in previous:
+            manifest[key] = previous[key]
     return original, template, manifest
 
 def retiring_manifest(previous, manifest):
     transitional = copy.deepcopy(previous)
+    transitional['reconciling'] = True
     active = set(c['email'] for c in manifest['counters'])
     for counter in transitional['counters']:
         counter['retired'] = counter['email'] not in active
@@ -213,23 +221,98 @@ def retiring_manifest(previous, manifest):
     transitional['pending_emails'] = sorted(active - previous_emails)
     return transitional
 
+def transaction_path():
+    return BACKUP + '/transaction.json'
+
+def monitor_sample():
+    # The parent holds the shared runtime lock; ordinary Bot samples cannot race.
+    run([ROOT + '/traffic-bot', '--monitor-reconcile-once'], cwd=ROOT, quiet=True)
+
+def live_template_matches(value):
+    live = read_json(LIVE)
+    expected = json.loads(value)
+    return all(live.get(key, {}) == expected.get(key, {}) for key in ('outbounds', 'routing'))
+
+def remove_transaction():
+    os.unlink(transaction_path())
+    if hasattr(os, 'O_DIRECTORY'):
+        fd = os.open(BACKUP, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+def recovery_warning():
+    conn = sqlite3.connect(ROOT + '/traffic-bot.db', timeout=10)
+    try:
+        conn.execute('INSERT OR REPLACE INTO monitor_state(name,value) VALUES(?,?)', ('last_reset', str(int(time.time()))))
+        conn.commit()
+    finally:
+        conn.close()
+
+def recover_transaction():
+    if not os.path.exists(transaction_path()):
+        return False
+    tx = read_json(transaction_path())
+    if tx.get('version') != 1 or tx.get('phase') not in ('prepared', 'committed'):
+        raise RuntimeError('Unknown monitor transaction; refusing unsafe recovery')
+    current = template_value()
+    original, value = tx['template'], tx['next_template']
+    if digest(current) not in (digest(original), digest(value)):
+        raise RuntimeError('Template manually edited during interrupted synchronization; refusing to overwrite')
+    if tx['phase'] == 'committed':
+        if digest(current) != digest(value):
+            raise RuntimeError('Committed template changed; refusing to overwrite')
+        firewall(tx['next_manifest'])
+        write_json(MANIFEST, tx['next_manifest'])
+        write_json(BACKUP + '/owner.json', {'applied_hash': digest(value)})
+        if not live_template_matches(value):
+            run(['systemctl', 'restart', 'x-ui'])
+        prune_retired_counters(tx['manifest'], tx['next_manifest'])
+        install_services()
+    else:
+        previous = copy.deepcopy(tx['manifest'])
+        # Never reassign an ID allocated by an interrupted transaction to a
+        # different account, even if its old counter rows survived in SQLite.
+        previous['next_uid'] = max(previous.get('next_uid', 1), tx['next_manifest'].get('next_uid', 1))
+        firewall(previous)
+        if current != original:
+            set_template(original)
+        if not live_template_matches(original):
+            run(['systemctl', 'restart', 'x-ui'])
+        write_json(MANIFEST, previous)
+        write_json(BACKUP + '/owner.json', tx['owner'])
+        prune_retired_counters(tx['next_manifest'], previous)
+        recovery_warning()
+    remove_transaction()
+    print('Recovered interrupted monitor synchronization (%s); Bot was not stopped.' % tx['phase'])
+    return True
+
 def upgrade_categories(reconcile=False):
+    recover_transaction()
     original, template, manifest = build_plan(upgrade=True, reconcile=reconcile)
     previous = read_json(MANIFEST)
     owner = read_json(BACKUP + '/owner.json')
-    # One bounded recovery snapshot; original installation backup stays intact.
+    if json.loads(original) == template and previous['counters'] == manifest['counters']:
+        write_json(MANIFEST, manifest)
+        install_services()
+        print('Account monitoring is already synchronized; no Xray restart needed.')
+        return
+    if previous['categories'] != manifest['categories']:
+        manifest['categories_updated'] = int(time.time())
+    if reconcile:
+        manifest['accounts_updated'] = int(time.time())
+    value = json.dumps(template, separators=(',', ':'))
+    tx = {'version': 1, 'phase': 'prepared', 'template': original,
+          'manifest': previous, 'owner': owner,
+          'next_template': value, 'next_manifest': manifest}
+    # One durable journal and one rolling backup, not a growing log history.
     write_json(BACKUP + '/upgrade.json', {'template': original, 'manifest': previous, 'owner': owner})
-    running = exists(['systemctl', 'is-active', '--quiet', 'traffic-bot'])
-    if running:
-        run(['systemctl', 'stop', 'traffic-bot'])
+    write_json(transaction_path(), tx)
     try:
-        # Freeze the daemon, then collect pending bytes for removed accounts
-        # before excluding them. Explicit retired flags do not authorize users.
-        if reconcile:
-            write_json(MANIFEST, retiring_manifest(previous, manifest))
-        run([ROOT + '/traffic-bot', '--monitor-once'], cwd=ROOT, quiet=True)
+        write_json(MANIFEST, retiring_manifest(previous, manifest))
+        monitor_sample()
         firewall(manifest)  # Append missing rules, never flush existing counters.
-        value = json.dumps(template, separators=(',', ':'))
         set_template(value)
         run(['systemctl', 'restart', 'x-ui'])
         time.sleep(3)
@@ -246,31 +329,21 @@ def upgrade_categories(reconcile=False):
         for inbound in live.get('inbounds', []):
             if inbound.get('settings', {}).get('clients'):
                 run([XRAY, 'api', 'inboundusercount', '--server=127.0.0.1:%d' % ports[0], '-tag', inbound['tag']], quiet=True)
-        if previous['categories'] != manifest['categories']:
-            manifest['categories_updated'] = int(time.time())
         if reconcile:
-            manifest['accounts_updated'] = int(time.time())
             # Include old connection teardown bytes before removing their rules.
-            run([ROOT + '/traffic-bot', '--monitor-once'], cwd=ROOT, quiet=True)
+            monitor_sample()
         write_json(MANIFEST, manifest)
         write_json(BACKUP + '/owner.json', {'applied_hash': digest(value)})
-        run([ROOT + '/traffic-bot', '--monitor-once'], cwd=ROOT, quiet=True)
+        monitor_sample()
+        tx['phase'] = 'committed'
+        write_json(transaction_path(), tx)
         if reconcile:
             prune_retired_counters(previous, manifest)
         install_services()
+        remove_transaction()
     except Exception:
-        set_template(original)
-        write_json(MANIFEST, previous)
-        write_json(BACKUP + '/owner.json', owner)
-        if reconcile:
-            firewall(previous)
-        # Added rules have no matching old outbound and are harmless on recovery.
-        # Keep existing kernel counts intact rather than flushing the chains.
-        run(['systemctl', 'restart', 'x-ui'])
+        recover_transaction()
         raise
-    finally:
-        if running:
-            run(['systemctl', 'start', 'traffic-bot'])
     print('Synchronized %d accounts, %d categories; pending bytes and history preserved.' % (len(set(c['email'] for c in manifest['counters'])), len(CATEGORIES)))
 
 def prune_retired_counters(previous, manifest):
@@ -435,7 +508,7 @@ def main():
     os.umask(0o077)
     # Manual and automatic syncs share a runtime lock; never race template/DB edits.
     lock = None
-    if args.apply or args.upgrade or args.reconcile or args.rollback:
+    if args.apply or args.upgrade or args.reconcile or args.rollback or args.restore_firewall:
         lock = open('/run/traffic-bot-monitor.lock', 'w')
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     if args.plan or args.plan_upgrade or args.plan_reconcile:
@@ -455,6 +528,7 @@ def main():
     elif args.install_services:
         install_services()
     else:
+        recover_transaction()
         rollback()
 
 if __name__ == '__main__':

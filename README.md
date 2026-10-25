@@ -13,6 +13,9 @@ optional integration (backs up the template and briefly restarts X-UI/Xray).
 Each device needs a unique VLESS ID/email; all accounts can share port 443.
 
 Use `/devices`, `/sites`, `/sites HOME`, or append a `YYYY-MM-DD` date.
+Deleted or renamed emails remain queryable within retention (for example,
+`/sites DRnc`); `/devices` includes their usage and labels them as historical
+accounts so device and site totals stay consistent.
 New accounting uses **Asia/Shanghai midnight boundaries**, samples once per minute
 and refreshes on queries. Only daily device/category byte aggregates are retained,
 automatically expiring after 30 days. No access logs, browsing history, source IP
@@ -44,6 +47,14 @@ outbounds/routes/counter chains, and keeps daily history and Telegram settings.
 X-UI/Xray briefly reloads; deleted users are never restored. Manual template
 edits abort safely. New accounts accrue only after their monitoring is activated.
 
+The Bot stays running during reconciliation. Sampling, helper operations and
+updates share a runtime lock. A bounded durable `monitor-backup/transaction.json`
+journal permits automatic recovery after interruption: uncommitted changes roll
+back and committed cleanup resumes idempotently. Allocated account IDs are never
+reused after rollback. Successful operations remove the journal; the latest
+`upgrade.json` backup is replaced in place. Manual template edits are protected,
+and potentially incomplete sampling after recovery is explicitly marked.
+
 Counters measure the site's IP-layer bytes, including connection overhead, not
 the VPS's combined interface accounting. Cross-midnight samples are apportioned
 by elapsed time; resets or collection outages can limit completeness. Unknown or
@@ -66,6 +77,14 @@ in the **VPS timezone**, matching `/daily`. An unfinished bucket is marked
 provisional; missing data is not reported as zero.
 Read-only byte-level diagnostics: `traffic-bot --check-traffic --interface eth0`.
 Updates support Git and archive installations and preserve the database and secrets.
+
+Billing configuration and dates use a consistent snapshot. A new cycle clears
+the previous offset/alert progress before queries, alerts or reports, rather than
+waiting for the daily report. The first cycle marker preserves the existing
+baseline. Non-finite and overflowing numeric inputs are rejected before saving.
+Calibration proposals and their traffic baseline survive restarts; confirmation
+adjusts the offset as well as the factor to avoid double correction. Expired or
+legacy confirmations without a candidate never write a zero factor.
 
 ---
 

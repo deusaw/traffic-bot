@@ -72,9 +72,6 @@ func StartPolling(env *AppEnv) {
 	}
 }
 
-// pendingFactor stores proposed calibration factor between steps 6→7.
-var pendingFactor float64
-
 func handleMessage(env *AppEnv, msg *tgbotapi.Message) {
 	cfg, err := GetConfig()
 	if err != nil {
@@ -92,7 +89,7 @@ func handleMessage(env *AppEnv, msg *tgbotapi.Message) {
 			return
 		}
 		if text == "/cancel" && cfg.SetupStep >= 6 {
-			UpdateConfig(func(c *AppConfig) { c.SetupStep = 0 })
+			UpdateConfig(func(c *AppConfig) { c.SetupStep = 0; clearPendingCalibration(c) })
 			SendMessage(msg.Chat.ID, "Operation cancelled.")
 			return
 		}
@@ -250,9 +247,16 @@ func handleSyncInput(env *AppEnv, chatID int64, text string) {
 		SendMessage(chatID, "⚠️ Cannot refresh traffic; sync cancelled and previous baseline preserved.")
 		return
 	}
-	cfg, _ := GetConfig()
-	start, end := GetCycleDates(cfg.ResetDay, cfg.BillingTimezone)
-	cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
+	cfg, start, end, err := GetCycleConfig()
+	if err != nil {
+		SendPlainMessage(chatID, "配置读取失败，本次同步未完成。")
+		return
+	}
+	cycleBytes, err := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
+	if err != nil {
+		SendPlainMessage(chatID, "流量读取失败，本次同步未完成。")
+		return
+	}
 
 	// What user currently sees
 	oldTotal := CalcTotalUsed(cfg, cycleBytes)
@@ -263,29 +267,40 @@ func handleSyncInput(env *AppEnv, chatID int64, text string) {
 		factor = 1.0
 	}
 	newOffset := actual - float64(cycleBytes)*factor
-
-	UpdateConfig(func(c *AppConfig) {
-		c.UsageOffset = newOffset
-		c.SetupStep = 0
-	})
-
-	reply := fmt.Sprintf("✅ Synced! Current cycle usage set to %s\nPrevious value: %s",
-		FormatBytes(actual), FormatBytes(oldTotal))
-
+	proposal := 0.0
 	// Recommend factor only when meaningful:
 	if oldTotal > 0 && cfg.UsageOffset == 0 {
-		suggested := actual / oldTotal
-		diff := suggested - 1.0
+		ratio := actual / oldTotal
+		suggested := factor * ratio
+		diff := ratio - 1.0
 		if diff < 0 {
 			diff = -diff
 		}
-		if diff > 0.01 {
-			reply += fmt.Sprintf("\n\nSuggested calibration factor: %.4f\nReply *yes* to apply, or anything else to skip", suggested)
-			pendingFactor = suggested
-			UpdateConfig(func(c *AppConfig) { c.SetupStep = 8 })
+		if diff > 0.01 && finiteNumber(suggested) && suggested > 0 {
+			proposal = suggested
 		}
 	}
-
+	synced := false
+	err = UpdateConfig(func(c *AppConfig) {
+		if c.LastResetCycle != cfg.LastResetCycle {
+			return
+		}
+		c.UsageOffset, c.SetupStep = newOffset, 0
+		clearPendingCalibration(c)
+		if proposal > 0 {
+			c.SetupStep = 8
+			c.PendingFactor, c.PendingRawBytes, c.PendingUsage = proposal, cycleBytes, actual
+		}
+		synced = true
+	})
+	if err != nil || !synced {
+		SendPlainMessage(chatID, "同步未完成：计费周期已变化或设置无法保存，请重新查询后再试。")
+		return
+	}
+	reply := fmt.Sprintf("✅ Synced! Current cycle usage set to %s\nPrevious value: %s", FormatBytes(actual), FormatBytes(oldTotal))
+	if proposal > 0 {
+		reply += fmt.Sprintf("\n\nSuggested calibration factor: %.4f\nReply *yes* to apply, or anything else to skip", proposal)
+	}
 	SendMessage(chatID, reply)
 }
 
@@ -307,11 +322,11 @@ func handleCalibrate(env *AppEnv, chatID int64, text string) {
 	// Direct set: /calibrate 1.25
 	if len(parts) == 2 {
 		factor, err := strconv.ParseFloat(parts[1], 64)
-		if err != nil || factor <= 0 {
+		if err != nil || !finiteNumber(factor) || factor <= 0 {
 			SendMessage(chatID, "❌ Factor must be a positive number, e.g. 1.25")
 			return
 		}
-		UpdateConfig(func(c *AppConfig) { c.CalibrationFactor = factor })
+		UpdateConfig(func(c *AppConfig) { c.CalibrationFactor = factor; clearPendingCalibration(c) })
 		SendMessage(chatID, fmt.Sprintf("✅ Calibration factor set to %.4f", factor))
 		return
 	}
@@ -328,13 +343,14 @@ func handleCalibrate(env *AppEnv, chatID int64, text string) {
 
 func handleCalibrateInput(env *AppEnv, chatID int64, text string) {
 	factor, err := strconv.ParseFloat(strings.TrimSpace(text), 64)
-	if err != nil || factor <= 0 {
+	if err != nil || !finiteNumber(factor) || factor <= 0 {
 		SendMessage(chatID, "❌ Please enter a positive number, e.g. 1.25")
 		return
 	}
 	UpdateConfig(func(c *AppConfig) {
 		c.CalibrationFactor = factor
 		c.SetupStep = 0
+		clearPendingCalibration(c)
 	})
 	SendMessage(chatID, fmt.Sprintf("✅ Calibration factor set to %.4f", factor))
 }
@@ -342,25 +358,55 @@ func handleCalibrateInput(env *AppEnv, chatID int64, text string) {
 func handleCalibrateConfirm(chatID int64, text string) {
 	text = strings.TrimSpace(text)
 	if text == "是" || strings.ToLower(text) == "yes" || strings.ToLower(text) == "y" {
-		UpdateConfig(func(c *AppConfig) {
-			c.CalibrationFactor = pendingFactor
-			c.SetupStep = 0
-		})
-		SendMessage(chatID, fmt.Sprintf("✅ Calibration factor set to %.4f", pendingFactor))
+		factor, err := confirmCalibration(0)
+		if err != nil {
+			SendPlainMessage(chatID, "校准确认已失效或无法保存，请重新执行 /sync 或 /calibrate。")
+			return
+		}
+		SendMessage(chatID, fmt.Sprintf("✅ Calibration factor set to %.4f", factor))
 		return
 	}
 	// Try parsing as custom factor
 	factor, err := strconv.ParseFloat(text, 64)
-	if err == nil && factor > 0 {
-		UpdateConfig(func(c *AppConfig) {
-			c.CalibrationFactor = factor
-			c.SetupStep = 0
-		})
+	if err == nil && finiteNumber(factor) && factor > 0 {
+		if _, err = confirmCalibration(factor); err != nil {
+			SendPlainMessage(chatID, "校准确认已失效或无法保存，请重新执行 /sync 或 /calibrate。")
+			return
+		}
 		SendMessage(chatID, fmt.Sprintf("✅ Calibration factor set to %.4f", factor))
 		return
 	}
-	UpdateConfig(func(c *AppConfig) { c.SetupStep = 0 })
+	UpdateConfig(func(c *AppConfig) { c.SetupStep = 0; clearPendingCalibration(c) })
 	SendMessage(chatID, "Cancelled. Factor unchanged.")
+}
+
+func confirmCalibration(custom float64) (float64, error) {
+	if !finiteNumber(custom) || custom < 0 {
+		return 0, fmt.Errorf("invalid calibration factor")
+	}
+	var applied float64
+	err := UpdateConfig(func(c *AppConfig) {
+		if c.SetupStep == 8 && finiteNumber(c.PendingFactor) && c.PendingFactor > 0 {
+			factor := c.PendingFactor
+			if custom > 0 && finiteNumber(custom) {
+				factor = custom
+			}
+			// The manual sync already set an offset. Re-anchor it to the
+			// persisted sample so applying a factor never corrects it twice.
+			c.CalibrationFactor = factor
+			c.UsageOffset = c.PendingUsage - float64(c.PendingRawBytes)*factor
+			applied = factor
+		}
+		c.SetupStep = 0
+		clearPendingCalibration(c)
+	})
+	if err != nil {
+		return 0, err
+	}
+	if applied <= 0 {
+		return 0, fmt.Errorf("expired calibration confirmation")
+	}
+	return applied, nil
 }
 
 // ==================== /report ====================
@@ -373,14 +419,17 @@ func handleReport(env *AppEnv, chatID int64) {
 // ==================== /status & /daily ====================
 
 func handleStatus(env *AppEnv, chatID int64) {
-	cfg, _ := GetConfig()
 	if err := SyncVnStatToDB(env.InterfaceName); err != nil {
 		log.Printf("status refresh: %v", err)
 		SendMessage(chatID, "⚠️ Cannot refresh traffic. Check vnStat daemon logs; old totals are not a live reading.")
 		return
 	}
 
-	start, end := GetCycleDates(cfg.ResetDay, cfg.BillingTimezone)
+	cfg, start, end, err := GetCycleConfig()
+	if err != nil {
+		SendPlainMessage(chatID, "配置读取失败，请检查数据库。")
+		return
+	}
 	startStr := start.Format("2006-01-02")
 	endStr := end.Format("2006-01-02")
 	cycleBytes, _ := GetCycleTraffic(startStr, endStr)
@@ -405,14 +454,17 @@ func handleStatus(env *AppEnv, chatID int64) {
 }
 
 func handleDaily(env *AppEnv, chatID int64) {
-	cfg, _ := GetConfig()
 	if err := SyncVnStatToDB(env.InterfaceName); err != nil {
 		log.Printf("daily refresh: %v", err)
 		SendMessage(chatID, "⚠️ Cannot refresh traffic. Check vnStat daemon logs.")
 		return
 	}
 
-	start, end := GetCycleDates(cfg.ResetDay, cfg.BillingTimezone)
+	cfg, start, end, err := GetCycleConfig()
+	if err != nil {
+		SendPlainMessage(chatID, "配置读取失败，请检查数据库。")
+		return
+	}
 	startStr := start.Format("2006-01-02")
 	today := time.Now().Format("2006-01-02")
 	endStr := today
@@ -462,19 +514,32 @@ func parseBandwidthAllUnits(text string) (float64, error) {
 		return 0, fmt.Errorf("invalid format")
 	}
 	val, err := strconv.ParseFloat(parts[0], 64)
-	if err != nil || val < 0 {
+	if err != nil || !finiteNumber(val) || val < 0 {
 		return 0, fmt.Errorf("invalid number")
 	}
-	switch strings.ToUpper(parts[1]) {
+	return bandwidthValue(val, parts[1], true)
+}
+
+func bandwidthValue(val float64, unit string, allowMB bool) (float64, error) {
+	var multiplier float64
+	switch strings.ToUpper(unit) {
 	case "MB":
-		return val * bytesPerMB, nil
+		if !allowMB {
+			return 0, fmt.Errorf("unsupported unit")
+		}
+		multiplier = bytesPerMB
 	case "GB":
-		return val * bytesPerGB, nil
+		multiplier = bytesPerGB
 	case "TB":
-		return val * bytesPerTB, nil
+		multiplier = bytesPerTB
 	default:
 		return 0, fmt.Errorf("unsupported unit")
 	}
+	result := val * multiplier
+	if !finiteNumber(result) {
+		return 0, fmt.Errorf("number outside supported range")
+	}
+	return result, nil
 }
 
 func parseBandwidth(text string) (float64, error) {
@@ -483,15 +548,8 @@ func parseBandwidth(text string) (float64, error) {
 		return 0, fmt.Errorf("invalid format")
 	}
 	val, err := strconv.ParseFloat(parts[0], 64)
-	if err != nil || val <= 0 {
+	if err != nil || !finiteNumber(val) || val <= 0 {
 		return 0, fmt.Errorf("invalid number")
 	}
-	switch strings.ToUpper(parts[1]) {
-	case "GB":
-		return val * bytesPerGB, nil
-	case "TB":
-		return val * bytesPerTB, nil
-	default:
-		return 0, fmt.Errorf("unsupported unit")
-	}
+	return bandwidthValue(val, parts[1], false)
 }

@@ -49,6 +49,10 @@ func GetCycleDates(resetDay int, tz ...string) (start, end time.Time) {
 		tzStr = tz[0]
 	}
 	now := NowInZone(tzStr)
+	return cycleDatesAt(now, resetDay)
+}
+
+func cycleDatesAt(now time.Time, resetDay int) (start, end time.Time) {
 	year, month, day := now.Date()
 	loc := now.Location()
 
@@ -86,6 +90,10 @@ func GetCycleDates(resetDay int, tz ...string) (start, end time.Time) {
 		}
 	}
 	return
+}
+
+func finiteNumber(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 // GetPrevCycleStart returns the start date of the previous billing cycle (for data cleanup).

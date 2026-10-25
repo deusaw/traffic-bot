@@ -13,9 +13,11 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -35,6 +37,7 @@ type MonitorConfig struct {
 	Counters      []MonitorCounter  `json:"counters"`
 	Categories    []MonitorCategory `json:"categories"`
 	PendingEmails []string          `json:"pending_emails,omitempty"`
+	Reconciling   bool              `json:"reconciling,omitempty"`
 }
 type usageRow struct {
 	Email, Category string
@@ -50,6 +53,7 @@ var monitorMu sync.Mutex
 var reconcileMu sync.Mutex
 var lastReconcileRequest time.Time
 var errMonitorAccountsChanged = errors.New("Xray accounts/accounting template changed")
+var errMonitorBusy = errors.New("monitor synchronization is in progress")
 var beijing = time.FixedZone("Asia/Shanghai", 8*60*60)
 var counterLine = regexp.MustCompile(`^\[\d+:(\d+)\] -A (TBOT_U[0-9a-f]{4}|TBOT_D[0-9a-f]{4}) .* --mark (0x[0-9a-fA-F]+|[0-9]+)(?:/\S+)? -j RETURN$`)
 
@@ -225,11 +229,74 @@ func recordCounters(tx *sql.Tx, rows []counterValue, from, to int64) (int, error
 }
 
 func syncMonitor() error {
+	return syncMonitorMode(false)
+}
+
+func monitorPath(env, fallback string) string {
+	if path := os.Getenv(env); path != "" {
+		return path
+	}
+	return fallback
+}
+
+func acquireMonitorLock() (*os.File, error) {
+	f, err := os.OpenFile(monitorPath("MONITOR_LOCK_PATH", "/run/traffic-bot-monitor.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, errMonitorBusy
+		}
+		return nil, err
+	}
+	return f, nil
+}
+
+func transitionalMonitor(conf *MonitorConfig) bool {
+	if conf.Reconciling || len(conf.PendingEmails) != 0 {
+		return true
+	}
+	for _, c := range conf.Counters {
+		if c.Retired {
+			return true
+		}
+	}
+	return false
+}
+
+func syncMonitorMode(reconcileSample bool) error {
 	monitorMu.Lock()
 	defer monitorMu.Unlock()
+	if reconcileSample {
+		lock, err := acquireMonitorLock()
+		if err == nil {
+			lock.Close()
+			return fmt.Errorf("internal sample requires the reconciliation lock to be held by its parent")
+		}
+		if !errors.Is(err, errMonitorBusy) {
+			return err
+		}
+	} else {
+		lock, err := acquireMonitorLock()
+		if err != nil {
+			return err
+		}
+		defer lock.Close() // Closing the descriptor releases the cross-process lock.
+		path := monitorPath("MONITOR_TRANSACTION_PATH", "/opt/traffic-bot/monitor-backup/transaction.json")
+		if _, err = os.Stat(path); err == nil {
+			return fmt.Errorf("%w; interrupted synchronization requires recovery", errMonitorAccountsChanged)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
 	conf, err := loadMonitorConfig()
 	if err != nil {
 		return err
+	}
+	if !reconcileSample && transitionalMonitor(conf) {
+		return fmt.Errorf("%w; incomplete monitor configuration requires recovery", errMonitorAccountsChanged)
 	}
 	rows, err := readMonitorCounters(conf)
 	if err != nil {
@@ -353,9 +420,13 @@ func handleMonitor(env *AppEnv, chatID int64, command string) {
 	}
 	if err = syncMonitor(); err != nil {
 		log.Printf("monitor query: %v", err)
+		if errors.Is(err, errMonitorBusy) {
+			SendPlainMessage(chatID, "监控正在同步，请稍后重试。历史用量会保留。")
+			return
+		}
 		if errors.Is(err, errMonitorAccountsChanged) {
 			if requestMonitorReconcile() == nil {
-				SendPlainMessage(chatID, "检测到账号变化，正在自动同步监控，请稍后重试。已有历史用量会保留。")
+				SendPlainMessage(chatID, "检测到账号变化或未完成的同步，正在自动同步或恢复监控，请稍后重试。历史用量会保留。")
 				return
 			}
 		}
@@ -375,20 +446,17 @@ func handleMonitor(env *AppEnv, chatID int64, command string) {
 		SendPlainMessage(chatID, "该日期没有可用历史数据。只保留启用后的最近 30 天，北京时间日期格式为 YYYY-MM-DD。")
 		return
 	}
+	emails, err := monitorEmails(conf, start, end)
+	if err != nil {
+		SendPlainMessage(chatID, "设备历史查询失败。")
+		return
+	}
 	filter := ""
 	if len(parts) > 1 {
 		wanted := strings.Join(parts[1:], " ")
-		for _, c := range conf.Counters {
-			if strings.EqualFold(c.Email, wanted) || strings.EqualFold(deviceLabel(c.Email), wanted) {
-				if filter != "" && filter != c.Email {
-					SendPlainMessage(chatID, "标签不唯一，请填写完整 email。")
-					return
-				}
-				filter = c.Email
-			}
-		}
-		if filter == "" {
-			SendPlainMessage(chatID, "未找到该设备，请使用面板设置的 email 或 /devices 中的标签。")
+		filter, err = resolveMonitorEmail(wanted, emails)
+		if err != nil {
+			SendPlainMessage(chatID, err.Error())
 			return
 		}
 	}
@@ -400,22 +468,7 @@ func handleMonitor(env *AppEnv, chatID int64, command string) {
 	var b strings.Builder
 	if parts[0] == "/devices" {
 		fmt.Fprintf(&b, "设备用量 · %s（北京时间）\n", time.Unix(start, 0).In(beijing).Format("2006-01-02"))
-		seen := map[string]bool{}
-		totals := map[string]usageRow{}
-		for _, r := range rows {
-			v := totals[r.Email]
-			v.Up += r.Up
-			v.Down += r.Down
-			totals[r.Email] = v
-		}
-		for _, c := range conf.Counters {
-			if seen[c.Email] || filter != "" && filter != c.Email {
-				continue
-			}
-			seen[c.Email] = true
-			r := totals[c.Email]
-			fmt.Fprintf(&b, "\n%s\n↑ %s  ↓ %s  合计 %s\n", deviceLabel(c.Email), FormatBytes(float64(r.Up)), FormatBytes(float64(r.Down)), FormatBytes(float64(r.Up+r.Down)))
-		}
+		writeDeviceUsage(&b, conf, rows, emails, filter)
 	} else {
 		fmt.Fprintf(&b, "网站分类用量 · %s（北京时间）\n", time.Unix(start, 0).In(beijing).Format("2006-01-02"))
 		if filter != "" {
@@ -435,9 +488,79 @@ func handleMonitor(env *AppEnv, chatID int64, command string) {
 	fmt.Fprintf(&b, "\n\n开始记录：%s（北京时间）\n用量为站点侧 IP 层收发字节，不等同于 VPS 网卡双向总量。未识别流量计入 Other。每分钟采样，跨日样本按时间比例分摊；查询时刷新。保留 30 天日汇总，不保存访问日志。", time.Unix(conf.Created, 0).In(beijing).Format("01-02 15:04"))
 	var reset int64
 	if e := db.QueryRow("SELECT value FROM monitor_state WHERE name='last_reset'").Scan(&reset); e == nil && reset >= start && reset < end {
-		b.WriteString("\n注意：今天计数器曾重置，重置前未采样部分可能缺失。")
+		b.WriteString("\n注意：今天统计曾中断或计数器重置，未采样部分可能缺失。")
 	}
 	SendPlainMessage(chatID, b.String())
+}
+
+func monitorEmails(conf *MonitorConfig, start, end int64) ([]string, error) {
+	set := map[string]bool{}
+	for _, c := range conf.Counters {
+		set[c.Email] = true
+	}
+	rows, err := db.Query("SELECT DISTINCT email FROM monitor_usage WHERE at>=? AND at<?", start, end)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var email string
+		if err = rows.Scan(&email); err != nil {
+			return nil, err
+		}
+		set[email] = true
+	}
+	emails := make([]string, 0, len(set))
+	for email := range set {
+		emails = append(emails, email)
+	}
+	sort.Strings(emails)
+	return emails, rows.Err()
+}
+
+func resolveMonitorEmail(wanted string, emails []string) (string, error) {
+	matched := ""
+	for _, email := range emails {
+		if wanted == email {
+			return email, nil
+		}
+	}
+	for _, email := range emails {
+		if strings.EqualFold(wanted, email) || strings.EqualFold(wanted, deviceLabel(email)) {
+			if matched != "" && matched != email {
+				return "", fmt.Errorf("标签不唯一，请填写完整 email。")
+			}
+			matched = email
+		}
+	}
+	if matched == "" {
+		return "", fmt.Errorf("未找到该设备，请使用面板设置的 email 或 /devices 中的标签。")
+	}
+	return matched, nil
+}
+
+func writeDeviceUsage(b *strings.Builder, conf *MonitorConfig, rows []usageRow, emails []string, filter string) {
+	active := map[string]bool{}
+	for _, c := range conf.Counters {
+		active[c.Email] = true
+	}
+	totals := map[string]usageRow{}
+	for _, r := range rows {
+		v := totals[r.Email]
+		v.Up, v.Down = v.Up+r.Up, v.Down+r.Down
+		totals[r.Email] = v
+	}
+	for _, email := range emails {
+		if filter != "" && filter != email {
+			continue
+		}
+		suffix := ""
+		if !active[email] {
+			suffix = "（历史账号）"
+		}
+		r := totals[email]
+		fmt.Fprintf(b, "\n%s%s\n↑ %s  ↓ %s  合计 %s\n", deviceLabel(email), suffix, FormatBytes(float64(r.Up)), FormatBytes(float64(r.Down)), FormatBytes(float64(r.Up+r.Down)))
+	}
 }
 
 func validateMonitorAccounts(conf *MonitorConfig) error {

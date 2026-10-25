@@ -1,7 +1,11 @@
 import copy
 import json
 import os
+import signal
+import shutil
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -141,22 +145,203 @@ class SetupSafetyTests(unittest.TestCase):
         self.assertTrue(any('TBOT_U0001' in cmd for cmd in commands))
         self.assertFalse(any('TBOT_U0009' in cmd or 'TBOT_D0009' in cmd for cmd in commands))
 
-    def test_failed_final_sample_restores_manifest_and_restarts_bot(self):
-        old = {'counters': [{'email': 'DELETED'}]}
-        new = {'counters': [{'email': 'HOME'}]}
-        owner = {'applied_hash': 'original'}
-        writes, commands = [], []
-        def run(args, **kw):
-            commands.append(args)
-            if '--monitor-once' in args:
-                raise RuntimeError('sample failed')
-            return b''
-        with patch.object(setup, 'build_plan', return_value=('original', {}, new)), patch.object(setup, 'read_json', side_effect=[old, owner]), patch.object(setup, 'write_json', side_effect=lambda path, data: writes.append((path, copy.deepcopy(data)))), patch.object(setup, 'set_template') as set_template, patch.object(setup, 'firewall'), patch.object(setup, 'exists', return_value=True), patch.object(setup, 'run', side_effect=run):
+
+class PowerLoss(BaseException):
+    pass
+
+
+class TransactionRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = self.temp.name
+        for key, value in {'ROOT': self.root, 'BACKUP': self.root + '/backup',
+                           'MANIFEST': self.root + '/manifest.json', 'LIVE': self.root + '/live.json'}.items():
+            p = patch.object(setup, key, value)
+            p.start()
+            self.addCleanup(p.stop)
+        os.mkdir(setup.BACKUP)
+        self.old = {'version': 1, 'created': 100, 'next_uid': 7, 'categories': [],
+                    'counters': [{'mark': 0x7a000101, 'email': 'DELETED', 'category': 'YouTube'},
+                                 {'mark': 0x7a000201, 'email': 'HOME', 'category': 'YouTube'}]}
+        self.new = copy.deepcopy(self.old)
+        self.new['next_uid'] = 8
+        self.new['counters'] = [self.old['counters'][1], {'mark': 0x7a000701, 'email': 'NEW', 'category': 'YouTube'}]
+        self.users = [{'settings': {'clients': [{'email': 'HOME'}, {'email': 'NEW'}]}, 'tag': 'inbound-443'},
+                      {'listen': '127.0.0.1', 'port': 62789, 'tag': 'api'}]
+        self.new['inbound_sha256'] = setup.digest(json.dumps(self.users, sort_keys=True))
+        self.original = json.dumps({'outbounds': [{'protocol': 'freedom'}, {'tag': 'tbot-1-1'}, {'tag': 'tbot-2-1'}], 'routing': {}})
+        self.target = {'outbounds': [{'protocol': 'freedom'},
+                                    {'tag': 'tbot-2-1', 'streamSettings': {'sockopt': {'mark': 0x7a000201}}},
+                                    {'tag': 'tbot-7-1', 'streamSettings': {'sockopt': {'mark': 0x7a000701}}}], 'routing': {}}
+        self.panel_value = self.original
+        self.owner = {'applied_hash': setup.digest(self.original)}
+        setup.write_json(setup.MANIFEST, self.old)
+        setup.write_json(setup.BACKUP + '/owner.json', self.owner)
+        self.write_live()
+        db = sqlite3.connect(self.root + '/traffic-bot.db')
+        db.executescript('CREATE TABLE monitor_counters(counter_key TEXT PRIMARY KEY,up INTEGER,down INTEGER); CREATE TABLE monitor_usage(email TEXT,down INTEGER); CREATE TABLE monitor_state(name TEXT PRIMARY KEY,value TEXT);')
+        db.execute('INSERT INTO monitor_usage VALUES (?,?)', ('DELETED', 800000000))
+        db.execute('INSERT INTO monitor_counters VALUES (?,1,2)', ('iptables-save:' + str(0x7a000201),))
+        db.commit()
+        db.close()
+        self.commands = []
+        patches = [patch.object(setup, 'template_value', side_effect=lambda: self.panel_value),
+                   patch.object(setup, 'set_template', side_effect=self.set_panel),
+                   patch.object(setup, 'build_plan', side_effect=lambda **kw: (self.panel_value, copy.deepcopy(self.target), copy.deepcopy(self.new))),
+                   patch.object(setup, 'run', side_effect=self.fake_run),
+                   patch.object(setup, 'exists', return_value=False),
+                   patch.object(setup, 'firewall'), patch.object(setup, 'install_services'), patch.object(setup.time, 'sleep')]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def set_panel(self, value):
+        self.panel_value = value
+
+    def write_live(self):
+        live = json.loads(self.panel_value)
+        live['inbounds'] = self.users
+        setup.write_json(setup.LIVE, live)
+
+    def fake_run(self, args, **kwargs):
+        self.commands.append(args)
+        if args == ['systemctl', 'restart', 'x-ui']:
+            self.write_live()
+        return b''
+
+    def assert_history_and_bot_preserved(self):
+        self.assertFalse(any(cmd[:3] in (['systemctl', 'stop', 'traffic-bot'], ['systemctl', 'restart', 'traffic-bot']) for cmd in self.commands))
+        con = sqlite3.connect(self.root + '/traffic-bot.db')
+        self.assertEqual(con.execute('SELECT * FROM monitor_usage').fetchall(), [('DELETED', 800000000)])
+        con.close()
+        self.assertEqual(setup.read_json(setup.LIVE)['inbounds'], self.users)
+
+    def test_failed_sample_rolls_back_without_stopping_bot(self):
+        with patch.object(setup, 'monitor_sample', side_effect=RuntimeError('sample failed')):
             with self.assertRaisesRegex(RuntimeError, 'sample failed'):
                 setup.upgrade_categories(reconcile=True)
-        self.assertEqual([value for path, value in writes if path == setup.MANIFEST][-1], old)
-        set_template.assert_called_once_with('original')
-        self.assertEqual(commands[-1], ['systemctl', 'start', 'traffic-bot'])
+        restored = setup.read_json(setup.MANIFEST)
+        self.assertEqual(restored['counters'], self.old['counters'])
+        self.assertEqual(restored['next_uid'], 8)
+        self.assertFalse(os.path.exists(setup.transaction_path()))
+        self.assert_history_and_bot_preserved()
+
+    def test_process_loss_after_template_change_recovers_from_durable_journal(self):
+        with patch.object(setup, 'monitor_sample', side_effect=[None, PowerLoss()]):
+            with self.assertRaises(PowerLoss):
+                setup.upgrade_categories(reconcile=True)
+        self.assertEqual(setup.read_json(setup.transaction_path())['phase'], 'prepared')
+        self.assertTrue(setup.read_json(setup.MANIFEST)['reconciling'])
+        self.assertNotEqual(self.panel_value, self.original)
+        setup.recover_transaction()
+        self.assertEqual(self.panel_value, self.original)
+        self.assertFalse(os.path.exists(setup.transaction_path()))
+        self.assertEqual(setup.read_json(setup.MANIFEST)['next_uid'], 8)
+        self.assert_history_and_bot_preserved()
+
+    def test_committed_cleanup_is_recovered_idempotently_without_rollback(self):
+        with patch.object(setup, 'prune_retired_counters', side_effect=PowerLoss()):
+            with self.assertRaises(PowerLoss):
+                setup.upgrade_categories(reconcile=True)
+        self.assertEqual(setup.read_json(setup.transaction_path())['phase'], 'committed')
+        self.assertTrue(setup.recover_transaction())
+        self.assertFalse(setup.recover_transaction())
+        self.assertEqual(json.loads(self.panel_value), self.target)
+        self.assertEqual(setup.read_json(setup.MANIFEST)['counters'], self.new['counters'])
+        self.assert_history_and_bot_preserved()
+
+    def test_recovery_never_overwrites_manual_template_changes(self):
+        with patch.object(setup, 'monitor_sample', side_effect=PowerLoss()):
+            with self.assertRaises(PowerLoss):
+                setup.upgrade_categories(reconcile=True)
+        self.panel_value = '{"manual":true}'
+        with self.assertRaisesRegex(RuntimeError, 'manually edited'):
+            setup.recover_transaction()
+        self.assertEqual(self.panel_value, '{"manual":true}')
+        self.assertTrue(os.path.exists(setup.transaction_path()))
+
+    def test_noop_reconcile_does_not_restart_xray(self):
+        self.target = json.loads(self.original)
+        self.new = copy.deepcopy(self.old)
+        with patch.object(setup, 'monitor_sample') as sample:
+            setup.upgrade_categories(reconcile=True)
+        sample.assert_not_called()
+        self.assertFalse(any(cmd[:2] == ['systemctl', 'restart'] for cmd in self.commands))
+
+    @unittest.skipUnless(hasattr(os, 'fork'), 'requires POSIX process signals')
+    def test_sigkill_leaves_a_recoverable_journal_and_never_stops_bot(self):
+        pid = os.fork()
+        if pid == 0:
+            with patch.object(setup, 'monitor_sample', side_effect=lambda: os.kill(os.getpid(), signal.SIGKILL)):
+                setup.upgrade_categories(reconcile=True)
+            os._exit(3)
+        _, status = os.waitpid(pid, 0)
+        self.assertTrue(os.WIFSIGNALED(status))
+        self.assertEqual(os.WTERMSIG(status), signal.SIGKILL)
+        self.assertEqual(setup.read_json(setup.transaction_path())['phase'], 'prepared')
+        self.assertTrue(setup.recover_transaction())
+        self.assertFalse(os.path.exists(setup.transaction_path()))
+        self.assert_history_and_bot_preserved()
+
+
+class UpdateSafetyTests(unittest.TestCase):
+    def exercise_failure(self, build_fails):
+        with tempfile.TemporaryDirectory() as root:
+            live, source, commands = [os.path.join(root, x) for x in ('live', 'source', 'bin')]
+            for path in (live, source, commands, live + '/.git'):
+                os.mkdir(path)
+            for name, content in {'monitor_setup.py': 'previous-helper', 'traffic-bot': 'previous-binary', 'go.sum': 'identical-sum'}.items():
+                with open(live + '/' + name, 'w') as f:
+                    f.write(content)
+            for name, content in {'monitor_setup.py': 'next-helper', 'go.sum': 'identical-sum', 'go.mod': 'module synthetic'}.items():
+                with open(source + '/' + name, 'w') as f:
+                    f.write(content)
+            stubs = {
+                'git': '''#!/bin/sh
+case "$1" in
+ diff|fetch) exit 0;;
+ ls-files) exit 1;;
+ show) printf 'identical-sum';;
+ archive) tar -cf - -C "$TEST_SOURCE" .;;
+ merge) cp "$TEST_SOURCE/monitor_setup.py" "$TEST_LIVE/monitor_setup.py"; cp "$TEST_SOURCE/go.sum" "$TEST_LIVE/go.sum";;
+ *) exit 2;;
+esac
+''',
+                'go': '''#!/bin/sh
+if [ "$1" = test ]; then [ "$TEST_FAIL_BUILD" != 1 ]; exit $?; fi
+if [ "$1" = build ]; then printf next-binary > "$3"; fi
+''',
+                'systemctl': '#!/bin/sh\n[ "$1" != is-active ]\n',
+                'id': '#!/bin/sh\nexit 1\n',
+                'sleep': '#!/bin/sh\nexit 0\n',
+            }
+            if not shutil.which('flock'):
+                # macOS has the same flock syscall but no util-linux executable.
+                # These failure tests need an uncontended inherited-fd lock only.
+                stubs['flock'] = '#!' + sys.executable + '\nimport fcntl,sys\nfcntl.flock(int(sys.argv[-1]),fcntl.LOCK_EX)\n'
+            for name, content in stubs.items():
+                with open(commands + '/' + name, 'w') as f:
+                    f.write(content)
+                os.chmod(commands + '/' + name, 0o700)
+            with open(os.path.join(os.path.dirname(__file__), 'update.sh')) as f:
+                script = f.read().replace('/opt/traffic-bot', live).replace('/run/traffic-bot-monitor.lock', root + '/lock')
+            path = root + '/update.sh'
+            with open(path, 'w') as f:
+                f.write(script)
+            env = dict(os.environ, PATH=commands + ':' + os.environ['PATH'], TEST_SOURCE=source, TEST_LIVE=live, TEST_FAIL_BUILD='1' if build_fails else '0')
+            result = subprocess.run(['bash', path], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            for name, expected in {'monitor_setup.py': 'previous-helper', 'traffic-bot': 'previous-binary', 'go.sum': 'identical-sum'}.items():
+                with open(live + '/' + name) as f:
+                    self.assertEqual(f.read(), expected, result.stdout)
+            self.assertFalse(any(name.startswith('.update.') for name in os.listdir(live)))
+
+    def test_failed_build_does_not_replace_helper_or_delete_generated_sum(self):
+        self.exercise_failure(True)
+
+    def test_failed_health_check_restores_compatible_helper_and_binary(self):
+        self.exercise_failure(False)
 
 
 if __name__ == '__main__':

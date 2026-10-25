@@ -33,7 +33,6 @@ func dailyReportLoop(env *AppEnv) {
 			lastSentDate = todayStr
 			sendDailyReport(env, cfg)
 			runDataCleanup(cfg)
-			resetAlertIfNewCycle(cfg)
 		}
 
 		// Fallback: if we somehow missed the exact minute (e.g. heavy load),
@@ -47,7 +46,6 @@ func dailyReportLoop(env *AppEnv) {
 				lastSentDate = todayStr
 				sendDailyReport(env, cfg)
 				runDataCleanup(cfg)
-				resetAlertIfNewCycle(cfg)
 			}
 		}
 	}
@@ -60,6 +58,12 @@ func sendDailyReport(env *AppEnv, cfg *AppConfig) {
 		SendMessage(env.AuthChatID, "⚠️ Traffic refresh failed; daily report is unavailable. Check vnStat service logs.")
 		return
 	}
+	current, start, end, err := GetCycleConfig()
+	if err != nil {
+		log.Printf("日报配置读取失败: %v", err)
+		return
+	}
+	cfg = current
 
 	// Select yesterday in the user's push timezone, never the billing timezone.
 	// Existing vnStat records still represent VPS-local calendar days.
@@ -70,7 +74,6 @@ func sendDailyReport(env *AppEnv, cfg *AppConfig) {
 		SendMessage(env.AuthChatID, "⚠️ Daily report database query failed.")
 		return
 	}
-	start, end := GetCycleDates(cfg.ResetDay, cfg.BillingTimezone)
 	cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
 	totalUsed := CalcTotalUsed(cfg, cycleBytes)
 	daysLeft := DaysUntilReset(cfg.ResetDay, cfg.BillingTimezone)
@@ -134,29 +137,6 @@ func runDataCleanup(cfg *AppConfig) {
 	}
 }
 
-// resetAlertIfNewCycle resets alert and offset when a NEW billing cycle begins.
-// Compares current cycle start date with last recorded reset cycle to ensure one-time reset.
-func resetAlertIfNewCycle(cfg *AppConfig) {
-	start, _ := GetCycleDates(cfg.ResetDay, cfg.BillingTimezone)
-	cycleStart := start.Format("2006-01-02")
-
-	if cfg.LastResetCycle == "" {
-		// First run or migration — just record current cycle, don't reset anything
-		UpdateConfig(func(c *AppConfig) {
-			c.LastResetCycle = cycleStart
-		})
-		log.Println("首次运行，记录当前计费周期: " + cycleStart)
-	} else if cycleStart != cfg.LastResetCycle {
-		// Actual new cycle transition — reset offset and alert
-		UpdateConfig(func(c *AppConfig) {
-			c.LastAlertPercent = 0
-			c.UsageOffset = 0
-			c.LastResetCycle = cycleStart
-		})
-		log.Println("新计费周期，告警百分比和同步偏移已重置")
-	}
-}
-
 // alertCheckLoop runs every 5 minutes to check if traffic thresholds are crossed.
 func alertCheckLoop(env *AppEnv) {
 	for {
@@ -172,8 +152,10 @@ func alertCheckLoop(env *AppEnv) {
 			log.Printf("告警同步失败: %v", err)
 			continue
 		}
-
-		start, end := GetCycleDates(cfg.ResetDay, cfg.BillingTimezone)
+		cfg, start, end, err := GetCycleConfig()
+		if err != nil || cfg.SetupStep > 0 || cfg.TotalBandwidth <= 0 {
+			continue
+		}
 		cycleBytes, _ := GetCycleTraffic(start.Format("2006-01-02"), end.Format("2006-01-02"))
 		totalUsed := CalcTotalUsed(cfg, cycleBytes)
 

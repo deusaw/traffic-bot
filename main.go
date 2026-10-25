@@ -12,9 +12,10 @@ import (
 func main() {
 	check := flag.Bool("check-traffic", false, "Read live traffic without opening the bot database or Telegram")
 	monitorOnce := flag.Bool("monitor-once", false, "Collect device/site counters once without connecting to Telegram")
+	reconcileOnce := flag.Bool("monitor-reconcile-once", false, "Collect a final sample under the reconciliation helper's exclusive lock")
 	iface := flag.String("interface", "eth0", "Interface for --check-traffic")
 	flag.Parse()
-	if *monitorOnce {
+	if *monitorOnce || *reconcileOnce {
 		path := os.Getenv("DB_PATH")
 		if path == "" {
 			path = "/opt/traffic-bot/traffic-bot.db"
@@ -23,7 +24,7 @@ func main() {
 			log.Fatal(err)
 		}
 		defer CloseDB()
-		if err := syncMonitor(); err != nil {
+		if err := syncMonitorMode(*reconcileOnce); err != nil {
 			log.Fatal(err)
 		}
 		fmt.Println("Device/site accounting sample saved; Telegram was not contacted.")

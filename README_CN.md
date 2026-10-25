@@ -18,6 +18,7 @@ python /opt/traffic-bot/monitor_setup.py --apply  # 备份原模板后接入；�
 - `/sites`：今天所有设备的网站分类合计。
 - `/sites HOME`：HOME 的网站分类用量；也可填写完整 email。
 - `/devices 2026-10-25`、`/sites HOME 2026-10-25`：查询指定北京时间日期。
+- 删除或改名后的邮箱仍可在保留期内查询，例如 `/sites DRnc`；`/devices` 会将已不在当前配置中的邮箱标为“历史账号”，其用量仍计入设备和网站分类合计。
 - 新统计固定按北京时间 **00:00–次日 00:00** 分天，独立于 VPS、计费和推送时区。旧 vnStat 日记录仍使用 VPS 时区，不能反推启用前的北京时间明细。
 - 每分钟采样、查询即时刷新，数据库仅保留最近 **30 天日汇总**；六设备二十分类最多约 3600 行用量数据。没有访问日志、域名明细、来源 IP 历史或抓包文件。
 - 支持 20 类：YouTube、Netflix、OpenAI、Telegram、Bilibili、TikTok、抖音（Douyin）、Instagram、Facebook、Steam、EpicGames、Roblox、雷神（Leigod）、iCloud、OneDrive、Dropbox、MEGA、苹果更新（AppleUpdate）、微软服务/更新（Microsoft）、Other。分类使用完整域名后缀；YouTube 额外使用现有 geosite 规则，OneDrive 的规则优先于微软通用规则。
@@ -33,6 +34,8 @@ python /opt/traffic-bot/monitor_setup.py --apply  # 备份原模板后接入；�
 
 手动校验/恢复命令是 `python /opt/traffic-bot/monitor_setup.py --plan-reconcile` 和 `--reconcile`。同步会先补记旧计数器尚未入库的流量，再移除已删除账号的监控出口、路由和自有计数链；新账号分配从未用过的编号，剩余账号的标记、历史日汇总与 Telegram 配置保留，短暂重载 X-UI/Xray。已删除账号不会被恢复。手工修改过模板时拒绝覆盖，保留原来的安全检查；默认 `--upgrade` 仍拒绝未同步的账号变化。新账号只能从接入监控后开始统计，无法回溯接入前未标记的连接。
 
+同步不再停止 Traffic Bot。采样、同步和更新共享互斥锁，避免旧快照被误判为计数器重置。同步前原子保存 `monitor-backup/transaction.json`：被中断后，下一次检查会恢复未提交的配置，或完成已提交事务的清理；新账号编号不会被重新分配给其他邮箱。正常完成后删除事务文件，`upgrade.json` 仍只保留最近一次备份。模板被人工修改时不会擅自覆盖。恢复过程中无法保证补齐的未采样部分会在查询中提示，不冒充完整的 0 用量。
+
 已启用旧分类的服务器，更新代码后运行 `python /opt/traffic-bot/monitor_setup.py --plan-upgrade` 校验，再运行 `--upgrade`。升级保留原账号及分类计数标记、数据库和 Telegram 配置，只追加缺少的计数规则，短暂重启 X-UI/Xray。已有模板被人工改动或账号不一致时拒绝覆盖。原始安装备份保留，最近一次升级恢复快照固定写入 `monitor-backup/upgrade.json`；不按次堆积备份。新增分类从升级后开始累计，升级前的 Other 历史不会被重新拆分。
 
 ### 实时查询与日报日期
@@ -43,6 +46,12 @@ python /opt/traffic-bot/monitor_setup.py --apply  # 备份原模板后接入；�
 - 重启、网卡计数器重置或 vnStat 尚未完成跨日归档时，实时查询会明确报错，待 vnStat 保存新基准后恢复。小于 0.01 GB 的变化可能因显示精度看不出来。
 - 只读诊断：`/opt/traffic-bot/traffic-bot --check-traffic --interface eth0`，输出字节数，不连接 Telegram，也不修改 Bot 数据库。
 - `update.sh` 同时支持 Git 和压缩包安装，先测试、编译再替换二进制；保留数据库与凭据，仅重启 Traffic Bot。
+
+### 计费周期与校准
+
+- 查询、告警和日报读取同一个计费周期快照；确认进入新周期时先清除上周期的同步偏移和告警进度，不再依赖日报发送。首次记录周期会保留已有同步基准，同一周期不会重复清除偏移。
+- 同步和校准拒绝 `NaN`、无穷大和换算溢出的数值，数据库写入前再次校验，防止异常输入破坏配置。
+- 待确认的倍率、原始流量和同步目标持久保存在配置中，Bot 重启后仍能确认。缺少候选值或已跨周期的确认会失效，不会把倍率写成 0。应用倍率时同步调整偏移，避免对同一笔流量重复校准。
 
 ---
 
