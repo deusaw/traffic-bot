@@ -8,8 +8,21 @@ stage=$(mktemp -d /opt/traffic-bot/.update.XXXXXX)
 trap 'rm -rf -- "$stage"' EXIT
 ref=${TRAFFIC_BOT_REF:-main}
 if [ -d .git ]; then
-  test -z "$(git status --porcelain)" || { echo 'Working tree has changes; refusing to overwrite.'; exit 1; }
-  git pull --ff-only
+  git diff --quiet && git diff --cached --quiet || { echo 'Tracked files have changes; refusing to overwrite.'; exit 1; }
+  git fetch origin "$ref"
+  moved_sum=0
+  # Early installers generated go.sum before the repository tracked it.
+  # Only migrate an identical generated file; never overwrite different content.
+  if [ -f go.sum ] && ! git ls-files --error-unmatch go.sum >/dev/null 2>&1; then
+    git show FETCH_HEAD:go.sum > "$stage/expected-go.sum"
+    cmp -s go.sum "$stage/expected-go.sum" || { echo 'Untracked go.sum differs; refusing to overwrite.'; exit 1; }
+    mv go.sum "$stage/original-go.sum"
+    moved_sum=1
+  fi
+  if ! git merge --ff-only FETCH_HEAD; then
+    if [ "$moved_sum" = 1 ]; then mv "$stage/original-go.sum" go.sum; fi
+    exit 1
+  fi
   git archive HEAD | tar -x -C "$stage"
 else
   curl -fL --connect-timeout 15 --max-time 180 "https://codeload.github.com/deusaw/traffic-bot/tar.gz/$ref" -o "$stage/source.tgz"
@@ -33,7 +46,7 @@ if ! systemctl restart traffic-bot || ! sleep 3 || ! systemctl is-active --quiet
   exit 1
 fi
 # Explicit source allowlist: preserve database, environment and configuration.
-for src in "$stage"/*.go "$stage"/go.mod "$stage"/go.sum "$stage"/install.sh "$stage"/update.sh "$stage"/README*.md; do
+for src in "$stage"/*.go "$stage"/go.mod "$stage"/go.sum "$stage"/install.sh "$stage"/update.sh "$stage"/monitor_setup.py "$stage"/README*.md; do
   [ ! -f "$src" ] || cp "$src" .
 done
 echo 'Traffic Bot updated. Database and credentials preserved.'

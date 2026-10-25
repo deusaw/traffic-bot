@@ -5,6 +5,28 @@
   <p align="center"><a href="./README.md">🇬🇧 English</a> | 🇨🇳 中文</p>
 </p>
 
+### 可选：设备 × 网站分类流量
+
+适用于使用 X-UI 管理、默认直连出口的 Linux VPS。每个设备必须使用独立 VLESS ID，并设置唯一的 `email` 标签；账号可共用 443 和 VLESS + REALITY + Vision。
+
+```bash
+python /opt/traffic-bot/monitor_setup.py --plan   # 只校验，不修改运行配置
+python /opt/traffic-bot/monitor_setup.py --apply  # 备份原模板后接入；短暂重启 X-UI/Xray
+```
+
+- `/devices`：今天各设备的上下行及合计。
+- `/sites`：今天所有设备的网站分类合计。
+- `/sites HOME`：HOME 的网站分类用量；也可填写完整 email。
+- `/devices 2026-10-25`、`/sites HOME 2026-10-25`：查询指定北京时间日期。
+- 新统计固定按北京时间 **00:00–次日 00:00** 分天，独立于 VPS、计费和推送时区。旧 vnStat 日记录仍使用 VPS 时区，不能反推启用前的北京时间明细。
+- 每分钟采样、查询即时刷新，数据库仅保留最近 **30 天日汇总**；六设备六分类最多约 1080 行用量数据。没有访问日志、域名明细、来源 IP 历史或抓包文件。
+- 分类目前包含 YouTube（含视频/图片 CDN 及现有 geosite:youtube 规则）、Netflix、OpenAI、Telegram、Bilibili、Other。IP 直连、不可识别/加密的域名及规则未覆盖的域名归入 Other；不保证识别所有服务流量。
+- 计量来源是标记后的站点连接的 **IP 层**收发字节，含该连接协议开销，与 vnStat 的网卡双向总量口径不同。跨日采样按时间比例分摊；中断/重置期间未采样的部分无法保证完整。
+- 不读取并清零 X-UI 的 gRPC 计数；使用自有计数链（只设置连接标记和计数，不增加拦截/放行规则）。两级分派避免每个包遍历全部设备分类。已有 fwmark 策略路由等不兼容配置会拒绝自动接入。
+- 新增或修改账号后，需要同步监控模板；Bot 会检测配置不一致并报错，不会把漏记显示成真实 0。原模板在 `/opt/traffic-bot/monitor-backup`；`python /opt/traffic-bot/monitor_setup.py --rollback` 可撤销本次模板改动（如后续人工修改模板，则拒绝覆盖）。
+
+一次采样校验工具：`traffic-bot --monitor-once`（不连接 Telegram；会保存采样至现有 Bot 数据库）。
+
 ### 实时查询与日报日期
 
 - vnStat 1.x：每次 `/status`、`/daily`、`/sync` 都读取网卡计数器，将尚未写入 vnStat 的增量叠加到已保存记录；重复查询不会重复累计。`/sync` 只校准基准，之后的新增流量继续累计。

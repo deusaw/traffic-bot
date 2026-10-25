@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -28,6 +29,29 @@ func SendMessage(chatID int64, text string) {
 	msg.ParseMode = "Markdown"
 	if _, err := bot.Send(msg); err != nil {
 		log.Printf("发送消息失败: %v", err)
+	}
+}
+
+// Labels and destinations are user input, so never interpret them as Markdown.
+func SendPlainMessage(chatID int64, text string) {
+	runes := []rune(text)
+	for len(runes) > 0 {
+		n, units := 0, 0
+		for n < len(runes) {
+			next := 1
+			if utf16.IsSurrogate(runes[n]) || runes[n] > 0xffff {
+				next = 2
+			}
+			if units+next > 3800 {
+				break
+			}
+			units += next
+			n++
+		}
+		if _, err := bot.Send(tgbotapi.NewMessage(chatID, string(runes[:n]))); err != nil {
+			log.Printf("发送监控消息失败: %v", err)
+		}
+		runes = runes[n:]
 	}
 }
 
@@ -107,6 +131,8 @@ func handleMessage(env *AppEnv, msg *tgbotapi.Message) {
 		handleCalibrate(env, msg.Chat.ID, text)
 	case text == "/report":
 		handleReport(env, msg.Chat.ID)
+	case text == "/devices" || strings.HasPrefix(text, "/devices ") || text == "/sites" || strings.HasPrefix(text, "/sites "):
+		handleMonitor(env, msg.Chat.ID, text)
 	default:
 		SendMessage(msg.Chat.ID, "Unknown command. Use /help to see available commands.")
 	}
@@ -169,6 +195,8 @@ func handleHelp(chatID int64) {
 
 /status - View current billing cycle traffic status
 /daily - View daily traffic breakdown
+/devices - 今日各设备用量（按邮箱标签）
+/sites - 今日网站分类用量，可加设备标签
 /sync - Manually sync panel usage
 /calibrate - Set calibration factor
 /config - View current settings

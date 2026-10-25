@@ -4,6 +4,12 @@ traffic-bot
 
 # Database
 *.db
+*.db-shm
+*.db-wal
+.update.*/
+monitor-backup/
+__pycache__/
+*.pyc
 
 # IDE
 .idea/

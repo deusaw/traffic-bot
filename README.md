@@ -5,6 +5,31 @@
   <p align="center">🇬🇧 English | <a href="./README_CN.md">🇨🇳 中文</a></p>
 </p>
 
+### Optional device × website accounting
+
+For compatible X-UI Linux hosts with a direct Freedom default outbound, run
+`python /opt/traffic-bot/monitor_setup.py --plan`, then `--apply` to enable the
+optional integration (backs up the template and briefly restarts X-UI/Xray).
+Each device needs a unique VLESS ID/email; all accounts can share port 443.
+
+Use `/devices`, `/sites`, `/sites HOME`, or append a `YYYY-MM-DD` date.
+New accounting uses **Asia/Shanghai midnight boundaries**, samples once per minute
+and refreshes on queries. Only daily device/category byte aggregates are retained,
+automatically expiring after 30 days. No access logs, browsing history, source IP
+history or packet captures are collected. YouTube (including the installed
+geosite rule), Netflix, OpenAI, Telegram, Bilibili and Other are supported.
+
+Counters measure the site's IP-layer bytes, including connection overhead, not
+the VPS's combined interface accounting. Cross-midnight samples are apportioned
+by elapsed time; resets or collection outages can limit completeness. Unknown or
+unobservable domains remain Other. The collector never resets X-UI API counters.
+The helper adds counter-only chains and socket marks, preserves credentials and
+existing blocking rules, and refuses conflicting fwmark policy routes.
+New/renamed users require reconciliation; mismatches fail explicitly.
+The original template is retained in `monitor-backup/`; `--rollback` restores it
+unless it has subsequently been edited. Existing Telegram credentials and Bot
+data are preserved. See [Chinese operational details](README_CN.md).
+
 ### Query freshness and daily dates
 
 On vnStat 1.x, `/status`, `/daily`, and `/sync` overlay unsaved kernel interface

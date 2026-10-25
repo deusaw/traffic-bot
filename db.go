@@ -17,7 +17,7 @@ type AppConfig struct {
 	UsageOffset       float64
 	CalibrationFactor float64
 	LastAlertPercent  int
-	SetupStep         int    // 0=complete, 1-5=wizard, 6=sync input, 7=calibrate input, 8=calibrate confirm
+	SetupStep         int // 0=complete, 1-5=wizard, 6=sync input, 7=calibrate input, 8=calibrate confirm
 	LastResetCycle    string
 }
 
@@ -32,10 +32,11 @@ var configMu sync.Mutex
 
 func InitDB(dbPath string) error {
 	var err error
-	db, err = sql.Open("sqlite3", dbPath+"?_journal_mode=WAL")
+	db, err = sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return err
 	}
+	db.SetMaxOpenConns(1)
 
 	schema := `
 	CREATE TABLE IF NOT EXISTS app_config (
@@ -74,7 +75,7 @@ func InitDB(dbPath string) error {
 	for _, m := range migrations {
 		db.Exec(m)
 	}
-	return nil
+	return initMonitorDB()
 }
 
 func GetConfig() (*AppConfig, error) {

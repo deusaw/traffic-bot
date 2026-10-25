@@ -11,8 +11,24 @@ import (
 
 func main() {
 	check := flag.Bool("check-traffic", false, "Read live traffic without opening the bot database or Telegram")
+	monitorOnce := flag.Bool("monitor-once", false, "Collect device/site counters once without connecting to Telegram")
 	iface := flag.String("interface", "eth0", "Interface for --check-traffic")
 	flag.Parse()
+	if *monitorOnce {
+		path := os.Getenv("DB_PATH")
+		if path == "" {
+			path = "/opt/traffic-bot/traffic-bot.db"
+		}
+		if err := InitDB(path); err != nil {
+			log.Fatal(err)
+		}
+		defer CloseDB()
+		if err := syncMonitor(); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println("Device/site accounting sample saved; Telegram was not contacted.")
+		return
+	}
 	if *check {
 		entries, err := FetchVnStatDays(*iface)
 		if err != nil {
@@ -50,6 +66,7 @@ func main() {
 
 	// 5. Start background scheduler (daily report + alert check)
 	StartScheduler(env)
+	startMonitor()
 	log.Println("定时任务已启动")
 
 	// 6. Handle graceful shutdown
